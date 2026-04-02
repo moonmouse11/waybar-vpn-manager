@@ -7,12 +7,14 @@ OUTLINE_IFACE = "outline-tun0"
 OUTLINE_BIN = Path("/opt/outline-client/Outline-Client.AppImage")
 
 
-def _interface_up(name: str) -> bool:
+def _interface_connected(name: str) -> bool:
     result = subprocess.run(
         ["ip", "link", "show", name],
-        capture_output=True, text=True
+        capture_output=True, text=True,
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    return "NO-CARRIER" not in result.stdout and "state DOWN" not in result.stdout
 
 
 class OutlineProvider(VPNProvider):
@@ -22,7 +24,7 @@ class OutlineProvider(VPNProvider):
         return "Outline"
 
     def connections(self) -> list[VPNConnection]:
-        active = _interface_up(OUTLINE_IFACE)
+        active = _interface_connected(OUTLINE_IFACE)
         return [VPNConnection(
             name="Outline",
             provider=self.name,

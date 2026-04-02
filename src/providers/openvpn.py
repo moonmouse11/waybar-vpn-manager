@@ -4,6 +4,7 @@ from pathlib import Path
 from .base import VPNProvider, VPNConnection, ActionResult
 
 OVPN_DIR = Path("/etc/openvpn/client")
+PID_DIR = Path("/run/openvpn")
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
@@ -12,17 +13,19 @@ def _run(cmd: list[str]) -> tuple[int, str]:
     return result.returncode, output
 
 
-def _active_profiles() -> set[str]:
-    code, out = _run(["systemctl", "list-units", "--state=active", "--no-legend", "openvpn-client@*.service"])
-    if code != 0 or not out:
-        return set()
-    profiles = set()
-    for line in out.splitlines():
-        # e.g. "openvpn-client@myvpn.service"
-        unit = line.split()[0]
-        profile = unit.removeprefix("openvpn-client@").removesuffix(".service")
-        profiles.add(profile)
-    return profiles
+def _pid_file(profile: str) -> Path:
+    return PID_DIR / f"client-{profile}.pid"
+
+
+def _is_running(profile: str) -> bool:
+    pid_file = _pid_file(profile)
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        return Path(f"/proc/{pid}").exists()
+    except (ValueError, OSError):
+        return False
 
 
 class OpenVPNProvider(VPNProvider):
@@ -32,7 +35,6 @@ class OpenVPNProvider(VPNProvider):
         return "OpenVPN"
 
     def connections(self) -> list[VPNConnection]:
-        active = _active_profiles()
         result = []
 
         if not OVPN_DIR.exists():
@@ -40,7 +42,7 @@ class OpenVPNProvider(VPNProvider):
 
         for conf in sorted(OVPN_DIR.glob("*.conf")) + sorted(OVPN_DIR.glob("*.ovpn")):
             profile = conf.stem
-            is_active = profile in active
+            is_active = _is_running(profile)
             result.append(VPNConnection(
                 name=profile,
                 provider=self.name,
@@ -49,27 +51,35 @@ class OpenVPNProvider(VPNProvider):
                 config_path=str(conf),
             ))
 
-        # Include active services with no config file (edge case)
-        known = {c.name for c in result}
-        for profile in active:
-            if profile not in known:
-                result.append(VPNConnection(
-                    name=profile,
-                    provider=self.name,
-                    active=True,
-                    interface="tun0",
-                ))
-
         return result
 
     def connect(self, connection: VPNConnection) -> ActionResult:
-        code, out = _run(["sudo", "systemctl", "start", f"openvpn-client@{connection.name}.service"])
+        _run(["sudo", "mkdir", "-p", str(PID_DIR)])
+        pid_file = _pid_file(connection.name)
+        config = connection.config_path or str(OVPN_DIR / f"{connection.name}.conf")
+        code, out = _run([
+            "sudo", "openvpn",
+            "--config", config,
+            "--daemon",
+            "--writepid", str(pid_file),
+        ])
         if code != 0:
             return ActionResult(success=False, message=out)
         return ActionResult(success=True, message=f"Connected: {connection.name}")
 
     def disconnect(self, connection: VPNConnection) -> ActionResult:
-        code, out = _run(["sudo", "systemctl", "stop", f"openvpn-client@{connection.name}.service"])
+        pid_file = _pid_file(connection.name)
+        if not pid_file.exists():
+            return ActionResult(success=False, message=f"Not running: {connection.name}")
+
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (ValueError, OSError) as e:
+            return ActionResult(success=False, message=f"Cannot read PID: {e}")
+
+        code, out = _run(["sudo", "kill", str(pid)])
+        _run(["sudo", "rm", "-f", str(pid_file)])
+
         if code != 0:
             return ActionResult(success=False, message=out)
         return ActionResult(success=True, message=f"Disconnected: {connection.name}")

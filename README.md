@@ -1,13 +1,13 @@
 # waybar-vpn-manager
 
-A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with support for WireGuard and Outline.
+A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with support for WireGuard, OpenVPN, and Outline.
 Built for Arch Linux with Hyprland / [Omarchy](https://omarchy.org/).
 
 ## Features
 
 - Status icon with active provider name
 - Connect / disconnect from walker dmenu
-- Import WireGuard `.conf` files via file picker
+- Import WireGuard (`.conf`) and OpenVPN (`.conf` / `.ovpn`) config files
 - Easy to extend with new VPN providers
 
 ## Requirements
@@ -15,8 +15,7 @@ Built for Arch Linux with Hyprland / [Omarchy](https://omarchy.org/).
 - Arch Linux
 - Waybar
 - Walker
-- `python` `wireguard-tools` `openresolv` `socat`
-- `zenity` (optional, for WireGuard config import)
+- `python` `wireguard-tools` `openvpn` `openresolv` `socat`
 
 ## Install
 
@@ -83,6 +82,7 @@ from .myprovider import MyProvider
 ALL_PROVIDERS = [
     WireGuardProvider(),
     OutlineProvider(),
+    OpenVPNProvider(),
     MyProvider(),
 ]
 ```

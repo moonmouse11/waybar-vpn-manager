@@ -28,8 +28,8 @@ def get_status() -> dict:
         for conn in provider.connections():
             if conn.active:
                 return {
-                    "text": f" {conn.provider}",
-                    "tooltip": f"{conn.provider}: {conn.interface or conn.name}",
+                    "text": f" {conn.provider}: {conn.name}",
+                    "tooltip": f"{conn.provider}: {conn.name}",
                     "class": "vpn-connected",
                 }
     return {
@@ -59,7 +59,12 @@ def build_menu_items() -> list[tuple[str, callable]]:
         if provider.name == "WireGuard":
             items.append((
                 "  Import WireGuard config...",
-                lambda p=provider: import_wireguard(p),
+                lambda p=provider: import_config_file(p, "WireGuard"),
+            ))
+        elif provider.name == "OpenVPN":
+            items.append((
+                "  Import OpenVPN config...",
+                lambda p=provider: import_config_file(p, "OpenVPN"),
             ))
 
     return items
@@ -80,21 +85,20 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
         return None
 
 
-def import_wireguard(provider) -> ActionResult:
+def import_config_file(provider, title: str) -> ActionResult:
     try:
         result = subprocess.run(
-            ["zenity", "--file-selection", "--title=Select WireGuard config", "--file-filter=*.conf"],
-            capture_output=True, text=True,
+            ["walker", "-d", "-I", "-p", f"{title} config path"],
+            capture_output=True,
+            text=True,
         )
         path = result.stdout.strip()
     except FileNotFoundError:
-        # zenity not available — ask user to pass path via notification
-        notify("Import", "Install zenity for file picker:\nsudo pacman -S zenity", urgent=True)
-        return ActionResult(success=False, message="zenity not installed")
+        notify("Error", "walker not found", urgent=True)
+        return ActionResult(success=False, message="walker not found")
 
     if not path:
-        return ActionResult(success=False, message="No file selected")
-
+        return ActionResult(success=False, message="No path entered")
     return provider.import_config(path)
 
 

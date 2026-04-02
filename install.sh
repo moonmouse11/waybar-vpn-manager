@@ -11,14 +11,14 @@ echo ""
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
 echo "==> Installing dependencies..."
-sudo pacman -S --needed --noconfirm python wireguard-tools openresolv socat
+sudo pacman -S --needed --noconfirm python wireguard-tools openvpn openresolv socat
 
 # ── sudoers rule ──────────────────────────────────────────────────────────────
 
 SUDOERS_FILE="/etc/sudoers.d/vpn-manager"
 if [[ ! -f "$SUDOERS_FILE" ]]; then
-    echo "==> Creating sudoers rule for wg-quick..."
-    echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/cp, /usr/bin/chmod" \
+    echo "==> Creating sudoers rule..."
+    echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn, /usr/bin/kill, /usr/bin/mkdir, /usr/bin/rm, /usr/bin/cp, /usr/bin/chmod" \
         | sudo tee "$SUDOERS_FILE" > /dev/null
     sudo chmod 440 "$SUDOERS_FILE"
 else
@@ -30,6 +30,12 @@ fi
 echo "==> Setting /etc/wireguard directory permissions..."
 sudo mkdir -p /etc/wireguard
 sudo chmod o+rx /etc/wireguard
+
+# ── /etc/openvpn/client directory ─────────────────────────────────────────────
+
+echo "==> Creating /etc/openvpn/client directory..."
+sudo mkdir -p /etc/openvpn/client
+sudo chmod 755 /etc/openvpn/client
 
 # ── Fix resolvconf ────────────────────────────────────────────────────────────
 
