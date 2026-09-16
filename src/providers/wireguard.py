@@ -1,8 +1,7 @@
 import subprocess
-import shutil
 from pathlib import Path
 
-from .base import VPNProvider, VPNConnection, ActionResult
+from .base import ActionResult, VPNConnection, VPNProvider
 
 WG_DIR = Path("/etc/wireguard")
 
@@ -26,7 +25,6 @@ def _active_interfaces() -> list[str]:
 
 
 class WireGuardProvider(VPNProvider):
-
     @property
     def name(self) -> str:
         return "WireGuard"
@@ -41,24 +39,28 @@ class WireGuardProvider(VPNProvider):
         for conf in sorted(WG_DIR.glob("*.conf")):
             profile = conf.stem
             is_active = profile in active
-            result.append(VPNConnection(
-                name=profile,
-                provider=self.name,
-                active=is_active,
-                interface=profile if is_active else None,
-                config_path=str(conf),
-            ))
+            result.append(
+                VPNConnection(
+                    name=profile,
+                    provider=self.name,
+                    active=is_active,
+                    interface=profile if is_active else None,
+                    config_path=str(conf),
+                )
+            )
 
         # Include active interfaces that have no config file (edge case)
         known = {c.name for c in result}
         for iface in active:
             if iface not in known:
-                result.append(VPNConnection(
-                    name=iface,
-                    provider=self.name,
-                    active=True,
-                    interface=iface,
-                ))
+                result.append(
+                    VPNConnection(
+                        name=iface,
+                        provider=self.name,
+                        active=True,
+                        interface=iface,
+                    )
+                )
 
         return result
 
@@ -74,6 +76,33 @@ class WireGuardProvider(VPNProvider):
         if code != 0:
             return ActionResult(success=False, message=out)
         return ActionResult(success=True, message=f"Disconnected: {iface}")
+
+    def autostart_enabled(self, profile: str) -> bool:
+        code, _ = _run(["systemctl", "is-enabled", f"wg-quick@{profile}"])
+        return code == 0
+
+    def toggle_autostart(self, connection: VPNConnection) -> ActionResult:
+        unit = f"wg-quick@{connection.name}"
+        if self.autostart_enabled(connection.name):
+            code, out = _run(["sudo", "systemctl", "disable", unit])
+            if code != 0:
+                return ActionResult(False, f"Failed to disable {unit}: {out}")
+            return ActionResult(True, f"Autostart disabled: {connection.name}")
+        code, out = _run(["sudo", "systemctl", "enable", unit])
+        if code != 0:
+            return ActionResult(False, f"Failed to enable {unit}: {out}")
+        return ActionResult(True, f"Autostart enabled: {connection.name}")
+
+    def delete_config(self, connection: VPNConnection) -> ActionResult:
+        if connection.active:
+            return ActionResult(False, f"Disconnect {connection.name} first")
+        path = Path(connection.config_path or WG_DIR / f"{connection.name}.conf")
+        if not path.exists():
+            return ActionResult(False, f"Config not found: {path}")
+        code, out = _run(["sudo", "rm", "-f", str(path)])
+        if code != 0:
+            return ActionResult(False, f"Failed to delete {path}: {out}")
+        return ActionResult(True, f"Deleted: {path.name}")
 
     def import_config(self, path: str) -> ActionResult:
         src = Path(path)

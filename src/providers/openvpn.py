@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from .base import VPNProvider, VPNConnection, ActionResult
+from .base import ActionResult, VPNConnection, VPNProvider
 
 OVPN_DIR = Path("/etc/openvpn/client")
 PID_DIR = Path("/run/openvpn")
@@ -29,7 +29,6 @@ def _is_running(profile: str) -> bool:
 
 
 class OpenVPNProvider(VPNProvider):
-
     @property
     def name(self) -> str:
         return "OpenVPN"
@@ -43,13 +42,15 @@ class OpenVPNProvider(VPNProvider):
         for conf in sorted(OVPN_DIR.glob("*.conf")) + sorted(OVPN_DIR.glob("*.ovpn")):
             profile = conf.stem
             is_active = _is_running(profile)
-            result.append(VPNConnection(
-                name=profile,
-                provider=self.name,
-                active=is_active,
-                interface="tun0" if is_active else None,
-                config_path=str(conf),
-            ))
+            result.append(
+                VPNConnection(
+                    name=profile,
+                    provider=self.name,
+                    active=is_active,
+                    interface="tun0" if is_active else None,
+                    config_path=str(conf),
+                )
+            )
 
         return result
 
@@ -57,12 +58,17 @@ class OpenVPNProvider(VPNProvider):
         _run(["sudo", "mkdir", "-p", str(PID_DIR)])
         pid_file = _pid_file(connection.name)
         config = connection.config_path or str(OVPN_DIR / f"{connection.name}.conf")
-        code, out = _run([
-            "sudo", "openvpn",
-            "--config", config,
-            "--daemon",
-            "--writepid", str(pid_file),
-        ])
+        code, out = _run(
+            [
+                "sudo",
+                "openvpn",
+                "--config",
+                config,
+                "--daemon",
+                "--writepid",
+                str(pid_file),
+            ]
+        )
         if code != 0:
             return ActionResult(success=False, message=out)
         return ActionResult(success=True, message=f"Connected: {connection.name}")

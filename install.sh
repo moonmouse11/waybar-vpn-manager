@@ -16,14 +16,20 @@ sudo pacman -S --needed --noconfirm python wireguard-tools openvpn openresolv so
 # ── sudoers rule ──────────────────────────────────────────────────────────────
 
 SUDOERS_FILE="/etc/sudoers.d/vpn-manager"
-if [[ ! -f "$SUDOERS_FILE" ]]; then
-    echo "==> Creating sudoers rule..."
-    echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn, /usr/bin/kill, /usr/bin/mkdir, /usr/bin/rm, /usr/bin/cp, /usr/bin/chmod" \
-        | sudo tee "$SUDOERS_FILE" > /dev/null
-    sudo chmod 440 "$SUDOERS_FILE"
-else
-    echo "==> sudoers rule already exists, skipping."
-fi
+# Managed by this installer: rewrite on every run so upgrades pick up new rules.
+echo "==> Writing sudoers rule..."
+echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn, /usr/bin/kill, /usr/bin/mkdir, /usr/bin/rm, /usr/bin/cp, /usr/bin/chmod, /usr/bin/systemctl enable wg-quick@*, /usr/bin/systemctl disable wg-quick@*, /usr/local/bin/happ-killswitch" \
+    | sudo tee "$SUDOERS_FILE" > /dev/null
+sudo chmod 440 "$SUDOERS_FILE"
+
+# ── killswitch script (root-owned, driven via the NOPASSWD sudoers rule) ─────
+
+echo "==> Installing happ-killswitch to /usr/local/bin..."
+sudo cp "$REPO_DIR/scripts/happ-killswitch" /usr/local/bin/happ-killswitch
+sudo chown root:root /usr/local/bin/happ-killswitch
+sudo chmod 755 /usr/local/bin/happ-killswitch
+# Remove the user-writable copy if it exists (superseded by the root-owned one)
+rm -f "$HOME/.local/bin/happ-killswitch"
 
 # ── /etc/wireguard permissions ────────────────────────────────────────────────
 

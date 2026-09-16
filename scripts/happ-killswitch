@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# happ-killswitch — killswitch для Happ в TUN-режиме.
+#
+# Режет ВЕСЬ исходящий трафик, кроме:
+#   - интерфейса happ-* (сам туннель)
+#   - локальных сетей (LAN, роутер, DHCP)
+#   - IP VPN-серверов Happ из конфига (иначе туннель не поднимется)
+#
+# Итог: туннель жив = есть интернет; туннель умер = интернета нет вообще.
+#
+# Использование:
+#   happ-killswitch detect   # определить IP сервера (Happ должен быть подключён)
+#   happ-killswitch on       # включить killswitch
+#   happ-killswitch off      # выключить (полный откат)
+#   happ-killswitch status   # показать текущие правила
+#
+# Требует root для on/off (sudo). Устанавливается в /usr/local/bin
+# с root-владением — см. install.sh проекта waybar-vpn-manager.
+set -euo pipefail
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/happ-killswitch.conf"
+
+# Внутри используем sudo только если не root (sudoers даёт NOPASSWD этому скрипту)
+SUDO=""
+if [[ $EUID -ne 0 ]]; then
+    SUDO="sudo"
+fi
+
+die() { echo "error: $*" >&2; exit 1; }
+
+load_ips() {
+    [[ -f $CONF ]] || die "конфиг $CONF не найден — сначала: happ-killswitch detect"
+    # shellcheck disable=SC1090
+    . "$CONF"
+    [[ -n ${SERVER_IPS:-} ]] || die "SERVER_IPS пуст в $CONF — сначала: happ-killswitch detect"
+}
+
+detect() {
+    # xray (Happ) ходит на VPN-сервер напрямую через физический интерфейс —
+    # эти соединения и ищем. Приватные/служебные адреса отбрасываем.
+    local ips
+    ips=$(ss -tn state established \
+        | awk '$3 ~ /%(wlan|eth|enp|wlp)/ { split($4, a, ":"); print a[1] }' \
+        | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|127\.|224\.|255\.|::1|fe80)' \
+        | sort -u || true)
+    [[ -n $ips ]] || die "не нашёл активных соединений Happ — подключи VPN и повтори"
+    {
+        echo "# IP VPN-серверов Happ (обновляется командой 'happ-killswitch detect')"
+        echo "SERVER_IPS=\"$ips\""
+    } > "$CONF"
+    echo "сохранено в $CONF:"
+    echo "$ips" | sed 's/^/  /'
+    echo
+    echo "ВНИМАНИЕ: если переключишь сервер в Happ — запусти detect заново."
+}
+
+on() {
+    load_ips
+    local addrs="" ip
+    for ip in $SERVER_IPS; do
+        addrs+="    ip daddr $ip accept
+"
+    done
+    $SUDO nft -f - <<EOF
+table inet happ-ks {
+  chain output {
+    type filter hook output priority 0; policy drop;
+
+    oifname "lo"        accept
+    oifname "happ-*"    accept
+$addrs
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept
+    ip daddr 224.0.0.0/4 accept
+    ip daddr 255.255.255.255 udp dport 67 accept
+    ip6 daddr { fe80::/10, ff00::/8 } accept
+  }
+}
+EOF
+    echo "killswitch ВКЛЮЧЁН (сервера: $SERVER_IPS)"
+}
+
+off() {
+    $SUDO nft delete table inet happ-ks 2>/dev/null \
+        && echo "killswitch ВЫКЛЮЧЕН, правила удалены" \
+        || echo "killswitch и не был включён"
+}
+
+status() {
+    if nft list table inet happ-ks 2>/dev/null; then
+        echo
+        echo "--- тест: выход через туннель ---"
+        curl -s --max-time 8 ifconfig.me && echo || echo "НЕДОСТУПЕН"
+    else
+        echo "killswitch выключен"
+    fi
+}
+
+case "${1:-}" in
+    detect) detect ;;
+    on)     on ;;
+    off)    off ;;
+    status) status ;;
+    *)      grep '^#' "$0" | head -20; exit 1 ;;
+esac

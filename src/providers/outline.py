@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from .base import VPNProvider, VPNConnection, ActionResult
+from .base import ActionResult, VPNConnection, VPNProvider
 
 OUTLINE_IFACE = "outline-tun0"
 OUTLINE_BIN = Path("/opt/outline-client/Outline-Client.AppImage")
@@ -10,7 +10,8 @@ OUTLINE_BIN = Path("/opt/outline-client/Outline-Client.AppImage")
 def _interface_connected(name: str) -> bool:
     result = subprocess.run(
         ["ip", "link", "show", name],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         return False
@@ -18,19 +19,20 @@ def _interface_connected(name: str) -> bool:
 
 
 class OutlineProvider(VPNProvider):
-
     @property
     def name(self) -> str:
         return "Outline"
 
     def connections(self) -> list[VPNConnection]:
         active = _interface_connected(OUTLINE_IFACE)
-        return [VPNConnection(
-            name="Outline",
-            provider=self.name,
-            active=active,
-            interface=OUTLINE_IFACE if active else None,
-        )]
+        return [
+            VPNConnection(
+                name="Outline",
+                provider=self.name,
+                active=active,
+                interface=OUTLINE_IFACE if active else None,
+            )
+        ]
 
     def connect(self, connection: VPNConnection) -> ActionResult:
         if not OUTLINE_BIN.exists():
@@ -44,8 +46,7 @@ class OutlineProvider(VPNProvider):
 
     def disconnect(self, connection: VPNConnection) -> ActionResult:
         result = subprocess.run(
-            ["pkill", "-f", "Outline-Client.AppImage"],
-            capture_output=True, text=True
+            ["pkill", "-f", "Outline-Client.AppImage"], capture_output=True, text=True
         )
         if result.returncode != 0:
             return ActionResult(success=False, message="Outline is not running")

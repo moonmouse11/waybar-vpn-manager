@@ -7,9 +7,9 @@ unix socket /tmp/happd.sock:
     frame  = 4-byte big-endian length + UTF-8 JSON payload
 
 Client -> daemon actions:
-    {"action": "list"}                          -> {"processes": [{"process-id": ..., "running": ...}]}
-    {"action": "status", "process-id": "..."}   -> {"running": bool, ...}
-    {"action": "stop",   "process-id": "..."}   -> graceful stop of a managed process
+    {"action": "list"} -> {"processes": [{"process-id": ..., "running": ...}]}
+    {"action": "status", "process-id": "..."} -> {"running": bool, ...}
+    {"action": "stop",   "process-id": "..."} -> graceful stop of a managed process
 
 Daemon -> client events (skipped): {"event": "connected", ...}, {"event": "push-token", ...}
 
@@ -24,7 +24,7 @@ import struct
 import subprocess
 from pathlib import Path
 
-from .base import VPNProvider, VPNConnection, ActionResult
+from .base import ActionResult, VPNConnection, VPNProvider
 
 HAPPD_SOCK = Path("/tmp/happd.sock")
 GUI_BIN = Path("/usr/bin/happ")
@@ -85,7 +85,7 @@ def _daemon_request(action: str, **params) -> dict | None:
             if "event" in resp and "status" not in resp:
                 continue
             return resp
-    except (OSError, socket.timeout):
+    except (TimeoutError, OSError):
         return None
     finally:
         sock.close()
@@ -135,7 +135,6 @@ def _last_server_name() -> str | None:
 
 
 class HappProvider(VPNProvider):
-
     @property
     def name(self) -> str:
         return "Happ"
@@ -146,18 +145,22 @@ class HappProvider(VPNProvider):
 
         if interfaces or processes:
             # several happ-* interfaces belong to a single connection — collapse them
-            return [VPNConnection(
-                name=self._connection_name(interfaces, processes),
-                provider=self.name,
-                active=True,
-                interface=interfaces[0] if interfaces else None,
-            )]
+            return [
+                VPNConnection(
+                    name=self._connection_name(interfaces, processes),
+                    provider=self.name,
+                    active=True,
+                    interface=interfaces[0] if interfaces else None,
+                )
+            ]
 
-        return [VPNConnection(
-            name=_last_server_name() or "Happ",
-            provider=self.name,
-            active=False,
-        )]
+        return [
+            VPNConnection(
+                name=_last_server_name() or "Happ",
+                provider=self.name,
+                active=False,
+            )
+        ]
 
     @staticmethod
     def _connection_name(interfaces: list[str], processes: list[str]) -> str:
