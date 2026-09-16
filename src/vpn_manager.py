@@ -14,11 +14,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import config
+import ipinfo
 import killswitch
 from providers import ALL_PROVIDERS
 from providers.base import ActionResult, VPNConnection, iface_traffic
 
 WAYBAR_SIGNAL = 11
+
+
+def visible_providers() -> list:
+    """Providers not hidden in the user config."""
+    cfg = config.load_config()
+    return [p for p in ALL_PROVIDERS if cfg.provider_visible(p.name)]
+
+
+def active_connections(providers=None) -> list[VPNConnection]:
+    return [
+        conn
+        for provider in (providers or visible_providers())
+        for conn in provider.connections()
+        if conn.active
+    ]
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -31,11 +48,8 @@ def get_status() -> dict:
     "vpn-disconnected" when nothing is up. Tooltip lists every active
     connection with per-interface traffic stats.
     """
-    active = []
-    for provider in ALL_PROVIDERS:
-        for conn in provider.connections():
-            if conn.active:
-                active.append(conn)
+    cfg = config.load_config()
+    active = active_connections()
 
     if not active:
         return {
@@ -56,6 +70,13 @@ def get_status() -> dict:
                 line += f"\n  {traffic}"
         tooltip.append(line)
 
+    if cfg.exit_ip_enabled:
+        exit_line = ipinfo.status_line(active[0].name, cfg.exit_ip_max_age)
+        if exit_line:
+            tooltip.append(exit_line)
+        else:
+            request_ip_update(active[0].name)
+
     first = active[0]
     return {
         "text": f" {first.provider}: {first.name}{extra}",
@@ -64,28 +85,42 @@ def get_status() -> dict:
     }
 
 
+def request_ip_update(connection_name: str):
+    """Fire-and-forget background exit-IP refresh (never blocks waybar)."""
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__)), "--update-ip", connection_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 # ── Menu actions ──────────────────────────────────────────────────────────────
 
 
 def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
     """Connect with killswitch interplay.
 
-    - Happ connect: refresh the killswitch server-IP whitelist (the user may
-      have switched servers).
-    - Other providers: disable killswitch first — their server IPs are not in
-      the whitelist, so the connection would hang.
+    - Happ connect: refresh the server-IP whitelist; if the config asks for
+      auto killswitch ("happ" mode), make sure it is enabled.
+    - Other providers: suspend killswitch for the duration (their servers
+      are not whitelisted); it auto-resumes on the next Happ connect.
     """
-    if killswitch.is_enabled():
-        if provider.name == "Happ":
-            killswitch.redetect()
-        else:
-            killswitch.disable()
-            notify("Killswitch", f"disabled (not compatible with {provider.name})")
-    return provider.connect(connection)
+    ks_result = None
+    if provider.name == "Happ":
+        ks_result = killswitch.resume_for_happ()
+    elif killswitch.is_enabled():
+        ks_result = killswitch.suspend_for(provider.name)
+
+    result = provider.connect(connection)
+    if ks_result and not ks_result.success:
+        notify("Killswitch — warning", ks_result.message)
+    return result
 
 
 def disconnect_all() -> ActionResult:
     stopped, failed = [], []
+    # act on everything, even providers hidden from the menu
     for provider in ALL_PROVIDERS:
         for conn in provider.connections():
             if conn.active:
@@ -131,7 +166,7 @@ def build_menu_items() -> list[tuple[str, callable]]:
     """Returns list of (label, action) pairs for the menu."""
     items = []
 
-    pairs = [(p, c) for p in ALL_PROVIDERS for c in p.connections()]
+    pairs = [(p, c) for p in visible_providers() for c in p.connections()]
     active = [(p, c) for p, c in pairs if c.active]
 
     if len(active) > 1:
@@ -168,11 +203,13 @@ def build_menu_items() -> list[tuple[str, callable]]:
                 )
             )
 
-    # Killswitch toggle (Happ TUN mode)
-    if killswitch.is_enabled():
-        items.append(("  Killswitch: ON — click to disable", killswitch.disable))
+    # Killswitch toggle (Happ TUN mode); the choice is persisted in config
+    if killswitch.is_enabled() or killswitch.mode() == "happ":
+        items.append(("  Killswitch: ON — click to disable", lambda: killswitch.set_mode(False)))
     else:
-        items.append(("  Killswitch: OFF — click to enable (Happ)", killswitch.enable))
+        items.append(
+            ("  Killswitch: OFF — click to enable (Happ)", lambda: killswitch.set_mode(True))
+        )
 
     return items
 
@@ -257,12 +294,19 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--status", action="store_true", help="Print waybar JSON status")
     group.add_argument("--menu", action="store_true", help="Open interactive menu")
+    group.add_argument(
+        "--update-ip",
+        metavar="CONN_NAME",
+        help="Refresh exit-IP cache in the background (internal)",
+    )
     args = parser.parse_args()
 
     if args.status:
         print(json.dumps(get_status()))
     elif args.menu:
         run_menu()
+    elif args.update_ip:
+        ipinfo.update(args.update_ip)
 
 
 if __name__ == "__main__":
