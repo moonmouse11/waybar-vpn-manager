@@ -35,6 +35,7 @@ The project is a Python backend (`src/`) invoked by two thin bash wrappers (`way
 | `WireGuardProvider` | `/etc/wireguard/*.conf` | `ip link show type wireguard` |
 | `OpenVPNProvider` | `/etc/openvpn/client/*.conf|.ovpn` | PID file in `/run/openvpn/` |
 | `OutlineProvider` | n/a (AppImage at `/opt/outline-client/`) | `ip link show outline-tun0` |
+| `HappProvider` | n/a (GUI `/usr/bin/happ`, daemon `/tmp/happd.sock`) | `happ-*` interfaces + happd process list |
 
 **Menu flow** — `vpn_manager.py:run_menu()` builds `(label, callable)` pairs, pipes labels to `walker -d`, then calls the matched action and sends a `notify-send` notification. After any action, Waybar is refreshed via `pkill -RTMIN+11 waybar`.
 

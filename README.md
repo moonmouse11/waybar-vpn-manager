@@ -1,6 +1,6 @@
 # waybar-vpn-manager
 
-A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with support for WireGuard, OpenVPN, and Outline.
+A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with support for WireGuard, OpenVPN, Outline, and [Happ](https://happ.su).
 Built for Arch Linux with Hyprland / [Omarchy](https://omarchy.org/).
 
 ## Features
