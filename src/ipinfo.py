@@ -12,6 +12,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import logutil
+
 CACHE_PATH = Path.home() / ".cache" / "vpn-manager" / "exit_ip.json"
 # ipwho.is gives IP + country in one request; ifconfig.me is the plain-IP fallback
 API_PRIMARY = "https://ipwho.is/"
@@ -67,6 +69,7 @@ def update(connection: str) -> None:
         entry.update(_fetch())
     except OSError as e:
         entry["error"] = str(e)[:120]
+        logutil.log(f"exit-ip fetch failed: {entry['error']}")
 
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)

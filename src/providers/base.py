@@ -10,6 +10,7 @@ class VPNConnection:
     active: bool
     interface: str | None = None
     config_path: str | None = None
+    uuid: str | None = None  # NetworkManager connection UUID
 
 
 @dataclass

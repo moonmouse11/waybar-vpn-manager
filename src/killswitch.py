@@ -18,6 +18,7 @@ Two modes (persisted in the user config):
 import subprocess
 
 import config
+import logutil
 from providers.base import ActionResult
 
 SCRIPT = "/usr/local/bin/happ-killswitch"
@@ -95,6 +96,7 @@ def _sudo(arg: str) -> ActionResult:
         timeout=15,
     )
     output = (result.stdout + result.stderr).strip()
+    logutil.log(f"killswitch: {arg} -> rc={result.returncode}: {output[:200]}")
     if result.returncode != 0:
         hint = " — run: make install" if "password" in output.lower() else ""
         reason = output.splitlines()[-1] if output else "no output"

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config
 import ipinfo
 import killswitch
+import logutil
 from providers import ALL_PROVIDERS
 from providers.base import ActionResult, VPNConnection, iface_traffic
 
@@ -132,14 +133,14 @@ def disconnect_all() -> ActionResult:
     return ActionResult(True, f"Disconnected: {message}")
 
 
-def manage_wireguard(provider) -> ActionResult:
+def manage_profiles(provider) -> ActionResult:
     """Second-level walker menu: pick a profile, then autostart/delete."""
     conns = provider.connections()
     if not conns:
-        return ActionResult(False, "No WireGuard profiles found")
+        return ActionResult(False, f"No {provider.name} profiles found")
 
     profile_labels = [f"{c.name}{'  (connected)' if c.active else ''}" for c in conns]
-    selected = walker_select(profile_labels, prompt="WG profile")
+    selected = walker_select(profile_labels, prompt=f"{provider.name} profile")
     if not selected:
         return ActionResult(True, "")
     conn = next((c for c in conns if selected.startswith(c.name)), None)
@@ -192,7 +193,7 @@ def build_menu_items() -> list[tuple[str, callable]]:
             items.append(
                 (
                     "  Manage WireGuard profiles...",
-                    lambda p=provider: manage_wireguard(p),
+                    lambda p=provider: manage_profiles(p),
                 )
             )
         elif provider.name == "OpenVPN":
@@ -200,6 +201,19 @@ def build_menu_items() -> list[tuple[str, callable]]:
                 (
                     "  Import OpenVPN config...",
                     lambda p=provider: import_config_file(p, "OpenVPN"),
+                )
+            )
+        elif provider.name == "NetworkManager":
+            items.append(
+                (
+                    "  Import VPN config into NetworkManager...",
+                    lambda p=provider: import_config_file(p, "NetworkManager"),
+                )
+            )
+            items.append(
+                (
+                    "  Manage NetworkManager profiles...",
+                    lambda p=provider: manage_profiles(p),
                 )
             )
 
@@ -262,6 +276,7 @@ def run_menu():
         return
 
     result: ActionResult = action()
+    logutil.log(f"menu: [{selected}] -> success={result.success}: {result.message}")
     if result.message:
         if result.success:
             notify("VPN", result.message)
