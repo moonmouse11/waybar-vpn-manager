@@ -7,22 +7,36 @@ unix socket /tmp/happd.sock:
     frame  = 4-byte big-endian length + UTF-8 JSON payload
 
 Client -> daemon actions:
+    {"action": "get-privilege"} -> {"privilege-level": 2, ...}
     {"action": "list"} -> {"processes": [{"process-id": ..., "running": ...}]}
     {"action": "status", "process-id": "..."} -> {"running": bool, ...}
     {"action": "stop",   "process-id": "..."} -> graceful stop of a managed process
+    {"action": "start",  "process-id": "...", "executable": "...",
+     "arguments": [...], "stdin-data": "<core config JSON>",
+     "environment": {...}}                      -> spawn a managed core process
 
-Daemon -> client events (skipped): {"event": "connected", ...}, {"event": "push-token", ...}
+Daemon -> client events (skipped): {"event": "started", ...}, {"event": "connected", ...}
 
-The GUI (Happ) itself owns connection state (server choice, config generation),
-so "connect" is only possible by launching the GUI — once running, the user
-has to press «Connect» there. Disconnect and status work headless via happd.
+Session ownership: happd reaps managed processes when the client connection
+that started them disconnects (see "reclaim-session-processes" in the daemon
+binary). A headless connect therefore needs a long-lived keeper process that
+holds the socket open — see run_keeper() and the --happ-keeper entry point.
+
+Headless connect: the GUI builds an xray config in memory and sends it as
+"stdin-data" of a "start" frame. We replay captured configs instead — see
+docs/happd-protocol.md and scripts/happd-extract-config.py. Disconnect and
+status always work headless via happd.
 """
 
 import json
 import socket
 import struct
 import subprocess
+import sys
+import time
 from pathlib import Path
+
+import logutil
 
 from .base import ActionResult, VPNConnection, VPNProvider
 
@@ -30,6 +44,12 @@ HAPPD_SOCK = Path("/tmp/happd.sock")
 GUI_BIN = Path("/usr/bin/happ")
 GUI_CONFIG = Path.home() / ".config" / "Happ.conf"
 IFACE_PREFIX = "happ-"
+XRAY_BIN = Path("/opt/happ/bin/core/xray")
+ROUTING_DIR = Path.home() / ".local/share/Happ/routing"
+
+# xray configs captured from the GUI <-> happd protocol (see docs/happd-protocol.md
+# and scripts/happd-extract-config.py): {server remarks: xray config}
+CAPTURED_CONFIGS = Path.home() / ".config/happ-capture/xray-configs.json"
 
 SOCKET_TIMEOUT = 1.5
 
@@ -134,6 +154,180 @@ def _last_server_name() -> str | None:
     return None
 
 
+def _captured_config(server_name: str | None) -> dict | None:
+    """Find a captured xray config for the given server name (fuzzy match)."""
+    if not server_name:
+        return None
+    try:
+        configs = json.loads(CAPTURED_CONFIGS.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(configs, dict):
+        return None
+    if server_name in configs:
+        return configs[server_name]
+    for name, cfg in configs.items():
+        if server_name in name or name in server_name:
+            return cfg
+    return None
+
+
+def _routing_asset_dir() -> Path | None:
+    """Directory with geoip/geosite data passed as XRAY_LOCATION_ASSET."""
+    try:
+        for geo in sorted(ROUTING_DIR.glob("*/*/geoip.dat")):
+            return geo.parent
+    except OSError:
+        pass
+    return None
+
+
+def _tun_interface_name(xray_config: dict) -> str | None:
+    for inbound in xray_config.get("inbounds", []):
+        if inbound.get("protocol") == "tun":
+            return inbound.get("settings", {}).get("name")
+    return None
+
+
+# ── Headless connect via a long-lived keeper session ─────────────────────────
+
+KEEPER_STATE = Path.home() / ".local/state/vpn-manager/happ-keeper.json"
+
+
+def _write_keeper_state(state: dict) -> None:
+    try:
+        KEEPER_STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = KEEPER_STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(KEEPER_STATE)
+    except OSError:
+        pass
+
+
+def _read_keeper_state() -> dict | None:
+    try:
+        data = json.loads(KEEPER_STATE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _open_session() -> socket.socket:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(SOCKET_TIMEOUT)
+    sock.connect(str(HAPPD_SOCK))
+    return sock
+
+
+def _send_frame(sock: socket.socket, frame: dict) -> None:
+    payload = json.dumps(frame).encode()
+    sock.sendall(struct.pack(">I", len(payload)) + payload)
+
+
+def _recv_frame(sock: socket.socket) -> dict | None:
+    """One framed JSON message; None on malformed payload. Raises OSError/
+    socket.timeout on connection problems."""
+    hdr = b""
+    while len(hdr) < 4:
+        chunk = sock.recv(4 - len(hdr))
+        if not chunk:
+            raise ConnectionError("happd closed the connection")
+        hdr += chunk
+    (length,) = struct.unpack(">I", hdr)
+    body = b""
+    while len(body) < length:
+        chunk = sock.recv(length - len(body))
+        if not chunk:
+            raise ConnectionError("happd closed the connection")
+        body += chunk
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return None
+
+
+def run_keeper() -> None:
+    """Long-lived happd session that owns the xray process.
+
+    happd reaps managed processes when the starting client disconnects, so
+    this process sends the "start" frame and then holds the socket open,
+    monitoring daemon events, until the tunnel goes away (user disconnect,
+    daemon restart). Progress is reported via KEEPER_STATE; the menu action
+    polls that file for the outcome.
+    """
+    logutil.log("keeper: starting")
+    state: dict = {"status": "connecting"}
+    _write_keeper_state(state)
+    sock: socket.socket | None = None
+    try:
+        cfg = _captured_config(_last_server_name())
+        if cfg is None:
+            state.update(status="error", message="no captured xray config")
+            _write_keeper_state(state)
+            return
+
+        iface = _tun_interface_name(cfg)
+        sock = _open_session()
+        request_id = f"wm-{time.time_ns()}"
+        params: dict = {
+            "action": "start",
+            "arguments": [],
+            "executable": str(XRAY_BIN),
+            "process-id": "xray-core",
+            "request-id": request_id,
+            "stdin-data": json.dumps(cfg),
+        }
+        asset_dir = _routing_asset_dir()
+        if asset_dir:
+            params["environment"] = {"XRAY_LOCATION_ASSET": str(asset_dir)}
+        _send_frame(sock, params)
+
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            frame = _recv_frame(sock)
+            if frame and frame.get("request-id") == request_id:
+                if frame.get("status") in ("started", "success"):
+                    break
+                state.update(status="error", message=frame.get("error", str(frame)))
+                _write_keeper_state(state)
+                return
+        else:
+            state.update(status="error", message="no response from happd")
+            _write_keeper_state(state)
+            return
+
+        state.update(status="connected", server=cfg.get("remarks"))
+        _write_keeper_state(state)
+        logutil.log(f"keeper: connected ({state['server']})")
+
+        # Hold the session open; exit when the tunnel disappears.
+        sock.settimeout(15)
+        while True:
+            try:
+                frame = _recv_frame(sock)
+            except TimeoutError:
+                if iface and not Path(f"/sys/class/net/{iface}").exists():
+                    break
+                continue
+            if frame and frame.get("event") == "stopped":
+                break
+    except (OSError, ConnectionError) as e:
+        logutil.log(f"keeper: session error: {e}")
+        if state.get("status") == "connecting":
+            state.update(status="error", message=str(e))
+            _write_keeper_state(state)
+    except Exception as e:  # noqa: BLE001 - always record keeper failures
+        logutil.log(f"keeper: unexpected error: {e}")
+        state.update(status="error", message=str(e))
+        _write_keeper_state(state)
+    finally:
+        if sock:
+            sock.close()
+        state.update(status="exited")
+        _write_keeper_state(state)
+        logutil.log("keeper: exited")
+
+
 class HappProvider(VPNProvider):
     @property
     def name(self) -> str:
@@ -179,6 +373,16 @@ class HappProvider(VPNProvider):
                 success=False,
                 message="Happ is already running — press «Connect» in the Happ window",
             )
+
+        # Prefer headless connect: replay the captured xray config through
+        # happd with a long-lived keeper session (no GUI needed).
+        # Falls back to launching the GUI.
+        if _captured_config(_last_server_name()) is not None:
+            result = self._headless_connect()
+            if result.success:
+                return result
+            logutil.log(f"happ headless connect failed, falling back to GUI: {result.message}")
+
         if not GUI_BIN.exists():
             return ActionResult(success=False, message=f"Happ not found at {GUI_BIN}")
 
@@ -192,6 +396,29 @@ class HappProvider(VPNProvider):
             success=True,
             message="Happ started — connecting to last used server…",
         )
+
+    def _headless_connect(self) -> ActionResult:
+        """Spawn the keeper process and wait for its verdict (max ~6 s)."""
+        KEEPER_STATE.unlink(missing_ok=True)
+        manager = Path(__file__).resolve().parent.parent / "vpn_manager.py"
+        subprocess.Popen(
+            [sys.executable, str(manager), "--happ-keeper"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            state = _read_keeper_state()
+            if state:
+                if state.get("status") == "connected":
+                    return ActionResult(True, f"Connected: {state.get('server', 'Happ')}")
+                if state.get("status") == "error":
+                    return ActionResult(False, state.get("message", "keeper error"))
+                if state.get("status") == "exited":
+                    return ActionResult(False, "keeper exited before connecting — see log")
+            time.sleep(0.2)
+        return ActionResult(False, "keeper timeout — see log")
 
     def disconnect(self, connection: VPNConnection) -> ActionResult:
         processes = _daemon_running_processes()

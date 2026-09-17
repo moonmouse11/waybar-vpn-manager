@@ -161,71 +161,103 @@ def manage_profiles(provider) -> ActionResult:
 
 
 # ── Menu ──────────────────────────────────────────────────────────────────────
+# Two levels, omarchy-style:
+#   level 1 — provider choice (WireGuard / OpenVPN / Happ / ...) + global actions
+#   level 2 — connections of the chosen provider + its import/manage actions
 
 
-def build_menu_items() -> list[tuple[str, callable]]:
-    """Returns list of (label, action) pairs for the menu."""
-    items = []
+def _killswitch_item() -> tuple[str, callable]:
+    if killswitch.is_enabled() or killswitch.mode() == "happ":
+        return ("  Killswitch: ON — click to disable", lambda: killswitch.set_mode(False))
+    return ("  Killswitch: OFF — click to enable (Happ)", lambda: killswitch.set_mode(True))
 
-    pairs = [(p, c) for p in visible_providers() for c in p.connections()]
-    active = [(p, c) for p, c in pairs if c.active]
 
-    if len(active) > 1:
+def provider_actions(provider) -> list[tuple[str, callable]]:
+    """Import / manage entries for providers that support them."""
+    if provider.name == "WireGuard":
+        return [
+            ("  Import WireGuard config...", lambda: import_config_file(provider, "WireGuard")),
+            ("  Manage WireGuard profiles...", lambda: manage_profiles(provider)),
+        ]
+    if provider.name == "OpenVPN":
+        return [("  Import OpenVPN config...", lambda: import_config_file(provider, "OpenVPN"))]
+    if provider.name == "NetworkManager":
+        return [
+            (
+                "  Import VPN config into NetworkManager...",
+                lambda: import_config_file(provider, "NetworkManager"),
+            ),
+            ("  Manage NetworkManager profiles...", lambda: manage_profiles(provider)),
+        ]
+    return []
+
+
+def menu_loop() -> ActionResult:
+    """Level 1: pick a provider (or a global action)."""
+    items: list[tuple[str, callable]] = []
+
+    all_active = active_connections(providers=list(ALL_PROVIDERS))
+    if len(all_active) > 1:
         items.append(("󰅖  Disconnect ALL", disconnect_all))
 
-    for provider, conn in pairs:
+    for provider in visible_providers():
+        conns = provider.connections()
+        if not conns:
+            continue
+        active = sum(1 for c in conns if c.active)
+        label = f"󰈀  {provider.name}"
+        if active:
+            label += f"  ({active}/{len(conns)})"
+        items.append((label, lambda p=provider: provider_menu(p)))
+
+    items.append(_killswitch_item())
+    return run_items(items, prompt="VPN")
+
+
+def provider_menu(provider) -> ActionResult:
+    """Level 2: connections of one provider, plus its actions."""
+    items: list[tuple[str, callable]] = []
+    for conn in provider.connections():
         if conn.active:
-            label = f"󰅖  {provider.name}: Disconnect {conn.name}"
-            items.append((label, lambda p=provider, c=conn: p.disconnect(c)))
+            items.append((f"󰅖  Disconnect {conn.name}", lambda c=conn: provider.disconnect(c)))
         else:
-            label = f"󰈀  {provider.name}: Connect {conn.name}"
-            items.append((label, lambda p=provider, c=conn: guarded_connect(p, c)))
+            items.append((f"󰈀  Connect {conn.name}", lambda c=conn: guarded_connect(provider, c)))
+    items.extend(provider_actions(provider))
+    items.append(("‹ Back", back_to_main))
+    run_items(items, prompt=provider.name)
+    # The submenu already notified/refreshed; stay silent for the parent level.
+    return ActionResult(True, "")
 
-    # Import / manage options for providers that support it
-    for provider in ALL_PROVIDERS:
-        if provider.name == "WireGuard":
-            items.append(
-                (
-                    "  Import WireGuard config...",
-                    lambda p=provider: import_config_file(p, "WireGuard"),
-                )
-            )
-            items.append(
-                (
-                    "  Manage WireGuard profiles...",
-                    lambda p=provider: manage_profiles(p),
-                )
-            )
-        elif provider.name == "OpenVPN":
-            items.append(
-                (
-                    "  Import OpenVPN config...",
-                    lambda p=provider: import_config_file(p, "OpenVPN"),
-                )
-            )
-        elif provider.name == "NetworkManager":
-            items.append(
-                (
-                    "  Import VPN config into NetworkManager...",
-                    lambda p=provider: import_config_file(p, "NetworkManager"),
-                )
-            )
-            items.append(
-                (
-                    "  Manage NetworkManager profiles...",
-                    lambda p=provider: manage_profiles(p),
-                )
-            )
 
-    # Killswitch toggle (Happ TUN mode); the choice is persisted in config
-    if killswitch.is_enabled() or killswitch.mode() == "happ":
-        items.append(("  Killswitch: ON — click to disable", lambda: killswitch.set_mode(False)))
-    else:
-        items.append(
-            ("  Killswitch: OFF — click to enable (Happ)", lambda: killswitch.set_mode(True))
-        )
+def back_to_main() -> ActionResult:
+    menu_loop()
+    return ActionResult(True, "")
 
-    return items
+
+def run_items(items: list[tuple[str, callable]], prompt: str) -> ActionResult:
+    """Show one walker menu, run the chosen action, notify + refresh waybar."""
+    if not items:
+        notify("VPN", "Nothing available")
+        return ActionResult(False, "nothing available")
+
+    selected = walker_select([label for label, _ in items], prompt=prompt)
+    if not selected:
+        return ActionResult(True, "")
+
+    action = next((fn for label, fn in items if label == selected), None)
+    if action is None:
+        return ActionResult(True, "")
+
+    result: ActionResult = action()
+    logutil.log(f"menu [{prompt}]: [{selected}] -> success={result.success}: {result.message}")
+    if result.message:
+        if result.success:
+            notify("VPN", result.message)
+        else:
+            notify("VPN — Error", result.message, urgent=True)
+
+    refresh_waybar()
+    return result
 
 
 def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
@@ -261,29 +293,7 @@ def import_config_file(provider, title: str) -> ActionResult:
 
 
 def run_menu():
-    items = build_menu_items()
-    if not items:
-        notify("VPN", "No VPN connections available")
-        return
-
-    labels = [label for label, _ in items]
-    selected = walker_select(labels)
-    if not selected:
-        return
-
-    action = next((fn for label, fn in items if label == selected), None)
-    if action is None:
-        return
-
-    result: ActionResult = action()
-    logutil.log(f"menu: [{selected}] -> success={result.success}: {result.message}")
-    if result.message:
-        if result.success:
-            notify("VPN", result.message)
-        else:
-            notify("VPN — Error", result.message, urgent=True)
-
-    refresh_waybar()
+    menu_loop()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -314,6 +324,11 @@ def main():
         metavar="CONN_NAME",
         help="Refresh exit-IP cache in the background (internal)",
     )
+    group.add_argument(
+        "--happ-keeper",
+        action="store_true",
+        help="Hold the happd session that owns the xray process (internal)",
+    )
     args = parser.parse_args()
 
     if args.status:
@@ -322,6 +337,10 @@ def main():
         run_menu()
     elif args.update_ip:
         ipinfo.update(args.update_ip)
+    elif args.happ_keeper:
+        from providers.happ import run_keeper
+
+        run_keeper()
 
 
 if __name__ == "__main__":
