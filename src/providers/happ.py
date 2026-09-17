@@ -36,6 +36,7 @@ import sys
 import time
 from pathlib import Path
 
+import happmeta
 import logutil
 
 from .base import ActionResult, VPNConnection, VPNProvider
@@ -46,10 +47,6 @@ GUI_CONFIG = Path.home() / ".config" / "Happ.conf"
 IFACE_PREFIX = "happ-"
 XRAY_BIN = Path("/opt/happ/bin/core/xray")
 ROUTING_DIR = Path.home() / ".local/share/Happ/routing"
-
-# xray configs captured from the GUI <-> happd protocol (see docs/happd-protocol.md
-# and scripts/happd-extract-config.py): {server remarks: xray config}
-CAPTURED_CONFIGS = Path.home() / ".config/happ-capture/xray-configs.json"
 
 SOCKET_TIMEOUT = 1.5
 
@@ -154,33 +151,6 @@ def _last_server_name() -> str | None:
     return None
 
 
-def _captured_config(server_name: str | None) -> dict | None:
-    """Find a captured xray config for the given server name (fuzzy match)."""
-    if not server_name:
-        return None
-    try:
-        configs = json.loads(CAPTURED_CONFIGS.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(configs, dict):
-        return None
-    if server_name in configs:
-        return configs[server_name]
-    for name, cfg in configs.items():
-        if server_name in name or name in server_name:
-            return cfg
-    return None
-
-
-def _captured_server_names() -> list[str]:
-    """All server names we have captured configs for (file order)."""
-    try:
-        configs = json.loads(CAPTURED_CONFIGS.read_text())
-    except (OSError, json.JSONDecodeError):
-        return []
-    return list(configs) if isinstance(configs, dict) else []
-
-
 def _routing_asset_dir() -> Path | None:
     """Directory with geoip/geosite data passed as XRAY_LOCATION_ASSET."""
     try:
@@ -269,9 +239,9 @@ def run_keeper(server_name: str | None = None) -> None:
     _write_keeper_state(state)
     sock: socket.socket | None = None
     try:
-        cfg = _captured_config(server_name or _last_server_name())
+        cfg = happmeta.resolve_config(server_name or (_last_server_name() or ""))
         if cfg is None:
-            state.update(status="error", message="no captured xray config")
+            state.update(status="error", message="no config for this server")
             _write_keeper_state(state)
             return
 
@@ -347,24 +317,30 @@ class HappProvider(VPNProvider):
         processes = _daemon_running_processes()
         is_active = bool(interfaces or processes)
 
-        # All servers we can connect to headless (from captured configs),
-        # plus the last-used one even if we have no config for it yet.
-        names = _captured_server_names()
-        last = _last_server_name()
-        if last and not any(last in n or n in last for n in names):
-            names.append(last)
+        # Full server list from provider subscriptions (+ captured extras).
+        servers = happmeta.all_servers()
+        if not servers:
+            return [
+                VPNConnection(
+                    name=_last_server_name() or "Happ",
+                    provider=self.name,
+                    active=is_active,
+                    interface=interfaces[0] if interfaces else None,
+                )
+            ]
 
-        # Which of them is the active one? The keeper state knows best.
+        # Which server is active? The keeper state knows best.
         active_name = None
         if is_active:
             state = _read_keeper_state()
             if state and state.get("status") == "connected":
                 active_name = state.get("server")
             if not active_name:
-                active_name = last
+                active_name = _last_server_name()
 
         conns = []
-        for name in names:
+        for server in servers:
+            name = server["name"]
             conn_active = bool(
                 active_name and (name == active_name or name in active_name or active_name in name)
             )
@@ -374,16 +350,6 @@ class HappProvider(VPNProvider):
                     provider=self.name,
                     active=conn_active,
                     interface=interfaces[0] if conn_active and interfaces else None,
-                )
-            )
-
-        if not conns:
-            conns.append(
-                VPNConnection(
-                    name=last or "Happ",
-                    provider=self.name,
-                    active=is_active,
-                    interface=interfaces[0] if interfaces else None,
                 )
             )
         return conns
@@ -404,9 +370,9 @@ class HappProvider(VPNProvider):
 
     def connect(self, connection: VPNConnection) -> ActionResult:
         # Headless connect works even while the GUI is running: the GUI just
-        # observes the same happd state. Try replaying the captured xray
-        # config for the chosen server first.
-        cfg = _captured_config(connection.name)
+        # observes the same happd state. Configs come from the provider
+        # subscription (merged like the GUI does) or from captures.
+        cfg = happmeta.resolve_config(connection.name)
         headless_error = None
         if cfg is not None:
             self._stop_running()  # switch servers if something else is up

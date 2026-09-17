@@ -244,24 +244,21 @@ def back_to_main() -> ActionResult:
 def happ_menu(provider) -> ActionResult:
     """Happ level 2: subscription providers, each leading to its servers."""
     happmeta.request_ping_update()
-    providers = happmeta.providers()
-    captured = happmeta.captured_providers()
-    conns = provider.connections()
+    servers = happmeta.all_servers()
+    active_names = {c.name for c in provider.connections() if c.active}
 
     groups: dict[str, list] = {}
-    for conn in conns:
-        sub_id = captured.get(conn.name, "")
-        pname = providers.get(sub_id, "Прочие / без провайдера")
-        groups.setdefault(pname, []).append(conn)
+    for server in servers:
+        is_active = any(
+            a == server["name"] or a in server["name"] or server["name"] in a for a in active_names
+        )
+        groups.setdefault(server["provider_name"], []).append(
+            {"name": server["name"], "active": is_active}
+        )
 
     items: list[tuple[str, callable]] = []
-    # providers with no captured servers still appear (informative)
-    ordered = list(groups.items())
-    for pname in providers.values():
-        if pname not in groups:
-            ordered.append((pname, []))
-    for pname, group in ordered:
-        active = sum(1 for c in group if c.active)
+    for pname, group in groups.items():
+        active = sum(1 for g in group if g["active"])
         label = f"󰈀  {pname}"
         if active:
             label += f"  ({active}/{len(group)})"
@@ -271,13 +268,14 @@ def happ_menu(provider) -> ActionResult:
     return ActionResult(True, "")
 
 
-def happ_provider_menu(provider, pname: str, conns: list) -> ActionResult:
+def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
     """Happ level 3: servers of one provider with ping + protocol info."""
-    if not conns:
-        notify("Happ", f"{pname}: нет захваченных конфигов — подключитесь через GUI")
+    if not entries:
+        notify("Happ", f"{pname}: нет серверов")
         return ActionResult(True, "")
     items: list[tuple[str, callable]] = []
-    for conn in conns:
+    for entry in entries:
+        conn = VPNConnection(name=entry["name"], provider="Happ", active=entry["active"])
         icon = "󰅖  Disconnect" if conn.active else "󰈀  Connect"
         label = f"{icon} {conn.name}"
         info = happmeta.server_info_suffix(conn.name)
