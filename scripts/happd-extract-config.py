@@ -80,6 +80,7 @@ def main() -> None:
         sys.exit(f"no 'start' frames found in {strace_path}")
 
     configs: dict[str, dict] = {}
+    server_provider: dict[str, str] = {}
     for frame in frames:
         try:
             xray_config = json.loads(frame["stdin-data"])
@@ -88,14 +89,32 @@ def main() -> None:
             continue
         name = xray_config.get("remarks") or frame.get("process-id") or "unknown"
         configs[name] = xray_config
+        asset = (frame.get("environment") or {}).get("XRAY_LOCATION_ASSET", "")
+        # /home/<user>/.local/share/Happ/routing/<subscriptionId>/<routingName>
+        parts = Path(asset).parts
+        if "routing" in parts:
+            idx = parts.index("routing")
+            if len(parts) > idx + 1:
+                server_provider[name] = parts[idx + 1]
         print(f"capture: {name} (process-id={frame.get('process-id')}, "
-              f"{len(frame['stdin-data'])} bytes)")
+              f"{len(frame['stdin-data'])} bytes, sub={server_provider.get(name, '?')})")
 
     if out_path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(configs, ensure_ascii=False, indent=2))
         out_path.chmod(0o600)
         print(f"saved -> {out_path}")
+        prov_path = out_path.with_name("xray-providers.json")
+        existing: dict = {}
+        if prov_path.exists():
+            try:
+                existing = json.loads(prov_path.read_text())
+            except json.JSONDecodeError:
+                existing = {}
+        existing.update(server_provider)
+        prov_path.write_text(json.dumps(existing, ensure_ascii=False, indent=1))
+        prov_path.chmod(0o600)
+        print(f"providers -> {prov_path} ({len(existing)} entries)")
 
 
 if __name__ == "__main__":

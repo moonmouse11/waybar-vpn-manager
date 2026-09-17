@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import config
+import happmeta
 import ipinfo
 import killswitch
 import logutil
@@ -216,6 +217,9 @@ def menu_loop() -> ActionResult:
 
 def provider_menu(provider) -> ActionResult:
     """Level 2: connections of one provider, plus its actions."""
+    if provider.name == "Happ":
+        return happ_menu(provider)
+
     items: list[tuple[str, callable]] = []
     for conn in provider.connections():
         if conn.active:
@@ -231,6 +235,60 @@ def provider_menu(provider) -> ActionResult:
 
 def back_to_main() -> ActionResult:
     menu_loop()
+    return ActionResult(True, "")
+
+
+# ── Happ: providers -> servers (with ping/protocol info) ─────────────────────
+
+
+def happ_menu(provider) -> ActionResult:
+    """Happ level 2: subscription providers, each leading to its servers."""
+    happmeta.request_ping_update()
+    providers = happmeta.providers()
+    captured = happmeta.captured_providers()
+    conns = provider.connections()
+
+    groups: dict[str, list] = {}
+    for conn in conns:
+        sub_id = captured.get(conn.name, "")
+        pname = providers.get(sub_id, "Прочие / без провайдера")
+        groups.setdefault(pname, []).append(conn)
+
+    items: list[tuple[str, callable]] = []
+    # providers with no captured servers still appear (informative)
+    ordered = list(groups.items())
+    for pname in providers.values():
+        if pname not in groups:
+            ordered.append((pname, []))
+    for pname, group in ordered:
+        active = sum(1 for c in group if c.active)
+        label = f"󰈀  {pname}"
+        if active:
+            label += f"  ({active}/{len(group)})"
+        items.append((label, lambda p=pname, g=group: happ_provider_menu(provider, p, g)))
+    items.append(("‹ Back", back_to_main))
+    run_items(items, prompt="Happ")
+    return ActionResult(True, "")
+
+
+def happ_provider_menu(provider, pname: str, conns: list) -> ActionResult:
+    """Happ level 3: servers of one provider with ping + protocol info."""
+    if not conns:
+        notify("Happ", f"{pname}: нет захваченных конфигов — подключитесь через GUI")
+        return ActionResult(True, "")
+    items: list[tuple[str, callable]] = []
+    for conn in conns:
+        icon = "󰅖  Disconnect" if conn.active else "󰈀  Connect"
+        label = f"{icon} {conn.name}"
+        info = happmeta.server_info_suffix(conn.name)
+        if info:
+            label += f"    {info}"
+        if conn.active:
+            items.append((label, lambda c=conn: provider.disconnect(c)))
+        else:
+            items.append((label, lambda c=conn: guarded_connect(provider, c)))
+    items.append(("‹ Back", lambda: happ_menu(provider)))
+    run_items(items, prompt=pname[:40])
     return ActionResult(True, "")
 
 
@@ -331,6 +389,11 @@ def main():
         metavar="SERVER",
         help="Hold the happd session that owns the xray process (internal)",
     )
+    group.add_argument(
+        "--update-ping",
+        action="store_true",
+        help="Refresh Happ server ping cache in the background (internal)",
+    )
     args = parser.parse_args()
 
     if args.status:
@@ -339,6 +402,8 @@ def main():
         run_menu()
     elif args.update_ip:
         ipinfo.update(args.update_ip)
+    elif args.update_ping:
+        happmeta.update_pings()
     elif args.happ_keeper is not None:
         from providers.happ import run_keeper
 
