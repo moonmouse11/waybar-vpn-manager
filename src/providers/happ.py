@@ -172,6 +172,15 @@ def _captured_config(server_name: str | None) -> dict | None:
     return None
 
 
+def _captured_server_names() -> list[str]:
+    """All server names we have captured configs for (file order)."""
+    try:
+        configs = json.loads(CAPTURED_CONFIGS.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    return list(configs) if isinstance(configs, dict) else []
+
+
 def _routing_asset_dir() -> Path | None:
     """Directory with geoip/geosite data passed as XRAY_LOCATION_ASSET."""
     try:
@@ -246,7 +255,7 @@ def _recv_frame(sock: socket.socket) -> dict | None:
         return None
 
 
-def run_keeper() -> None:
+def run_keeper(server_name: str | None = None) -> None:
     """Long-lived happd session that owns the xray process.
 
     happd reaps managed processes when the starting client disconnects, so
@@ -255,12 +264,12 @@ def run_keeper() -> None:
     daemon restart). Progress is reported via KEEPER_STATE; the menu action
     polls that file for the outcome.
     """
-    logutil.log("keeper: starting")
+    logutil.log(f"keeper: starting ({server_name or 'last server'})")
     state: dict = {"status": "connecting"}
     _write_keeper_state(state)
     sock: socket.socket | None = None
     try:
-        cfg = _captured_config(_last_server_name())
+        cfg = _captured_config(server_name or _last_server_name())
         if cfg is None:
             state.update(status="error", message="no captured xray config")
             _write_keeper_state(state)
@@ -336,29 +345,55 @@ class HappProvider(VPNProvider):
     def connections(self) -> list[VPNConnection]:
         interfaces = _happ_interfaces()
         processes = _daemon_running_processes()
+        is_active = bool(interfaces or processes)
 
-        if interfaces or processes:
-            # several happ-* interfaces belong to a single connection — collapse them
-            return [
+        # All servers we can connect to headless (from captured configs),
+        # plus the last-used one even if we have no config for it yet.
+        names = _captured_server_names()
+        last = _last_server_name()
+        if last and not any(last in n or n in last for n in names):
+            names.append(last)
+
+        # Which of them is the active one? The keeper state knows best.
+        active_name = None
+        if is_active:
+            state = _read_keeper_state()
+            if state and state.get("status") == "connected":
+                active_name = state.get("server")
+            if not active_name:
+                active_name = last
+
+        conns = []
+        for name in names:
+            conn_active = bool(
+                active_name and (name == active_name or name in active_name or active_name in name)
+            )
+            conns.append(
                 VPNConnection(
-                    name=self._connection_name(interfaces, processes),
+                    name=name,
                     provider=self.name,
-                    active=True,
+                    active=conn_active,
+                    interface=interfaces[0] if conn_active and interfaces else None,
+                )
+            )
+
+        if not conns:
+            conns.append(
+                VPNConnection(
+                    name=last or "Happ",
+                    provider=self.name,
+                    active=is_active,
                     interface=interfaces[0] if interfaces else None,
                 )
-            ]
-
-        return [
-            VPNConnection(
-                name=_last_server_name() or "Happ",
-                provider=self.name,
-                active=False,
             )
-        ]
+        return conns
 
     @staticmethod
     def _connection_name(interfaces: list[str], processes: list[str]) -> str:
-        """Prefer the server name from the Happ GUI; fall back to interface/process."""
+        """Prefer the server name from the keeper state / Happ GUI."""
+        state = _read_keeper_state()
+        if state and state.get("status") == "connected" and state.get("server"):
+            return state["server"]
         if name := _last_server_name():
             return name
         if interfaces:
@@ -368,21 +403,25 @@ class HappProvider(VPNProvider):
         return "Happ"
 
     def connect(self, connection: VPNConnection) -> ActionResult:
-        if _gui_running():
-            return ActionResult(
-                success=False,
-                message="Happ is already running — press «Connect» in the Happ window",
-            )
-
-        # Prefer headless connect: replay the captured xray config through
-        # happd with a long-lived keeper session (no GUI needed).
-        # Falls back to launching the GUI.
-        if _captured_config(_last_server_name()) is not None:
-            result = self._headless_connect()
+        # Headless connect works even while the GUI is running: the GUI just
+        # observes the same happd state. Try replaying the captured xray
+        # config for the chosen server first.
+        cfg = _captured_config(connection.name)
+        headless_error = None
+        if cfg is not None:
+            self._stop_running()  # switch servers if something else is up
+            result = self._headless_connect(cfg.get("remarks") or connection.name)
             if result.success:
                 return result
+            headless_error = result.message
             logutil.log(f"happ headless connect failed, falling back to GUI: {result.message}")
 
+        if _gui_running():
+            detail = f" — {headless_error}" if headless_error else ""
+            return ActionResult(
+                success=False,
+                message=f"No captured config / connect failed{detail} — press «Connect» in Happ",
+            )
         if not GUI_BIN.exists():
             return ActionResult(success=False, message=f"Happ not found at {GUI_BIN}")
 
@@ -397,12 +436,26 @@ class HappProvider(VPNProvider):
             message="Happ started — connecting to last used server…",
         )
 
-    def _headless_connect(self) -> ActionResult:
+    def _stop_running(self) -> None:
+        """Stop managed processes and wait for the tunnel to come down
+        (used when switching servers)."""
+        processes = _daemon_running_processes()
+        if not processes:
+            return
+        for process_id in processes:
+            _daemon_request("stop", **{"process-id": process_id})
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if not _happ_interfaces():
+                return
+            time.sleep(0.3)
+
+    def _headless_connect(self, server_name: str) -> ActionResult:
         """Spawn the keeper process and wait for its verdict (max ~6 s)."""
         KEEPER_STATE.unlink(missing_ok=True)
         manager = Path(__file__).resolve().parent.parent / "vpn_manager.py"
         subprocess.Popen(
-            [sys.executable, str(manager), "--happ-keeper"],
+            [sys.executable, str(manager), "--happ-keeper", server_name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

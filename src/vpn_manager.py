@@ -326,7 +326,9 @@ def main():
     )
     group.add_argument(
         "--happ-keeper",
-        action="store_true",
+        nargs="?",
+        const="",
+        metavar="SERVER",
         help="Hold the happd session that owns the xray process (internal)",
     )
     args = parser.parse_args()
@@ -337,10 +339,10 @@ def main():
         run_menu()
     elif args.update_ip:
         ipinfo.update(args.update_ip)
-    elif args.happ_keeper:
+    elif args.happ_keeper is not None:
         from providers.happ import run_keeper
 
-        run_keeper()
+        run_keeper(args.happ_keeper or None)
 
 
 if __name__ == "__main__":
