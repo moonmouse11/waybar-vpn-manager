@@ -115,7 +115,9 @@ def test_server_params_and_ping_cache(tmp_path, monkeypatch):
     ping_file.write_text(json.dumps({"ee": {"ms": 42.0, "at": time.time()}}))
     assert happmeta.ping_ms("ee") == 42.0
     assert "42 ms" in happmeta.server_info_suffix("ee")
-    assert "est.example.com:8443" in happmeta.server_info_suffix("ee")
+    # standard vless/tcp/reality tuple is omitted; host is not shown (too long)
+    assert "vless" not in happmeta.server_info_suffix("ee")
+    assert "example.com" not in happmeta.server_info_suffix("ee")
 
 
 def test_ping_cache_expiry(tmp_path, monkeypatch):

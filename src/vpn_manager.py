@@ -199,14 +199,14 @@ def menu_loop() -> ActionResult:
 
     all_active = active_connections(providers=list(ALL_PROVIDERS))
     if len(all_active) > 1:
-        items.append(("󰅖  Disconnect ALL", disconnect_all))
+        items.append(("Disconnect ALL", disconnect_all))
 
     for provider in visible_providers():
         conns = provider.connections()
         if not conns:
             continue
         active = sum(1 for c in conns if c.active)
-        label = f"󰈀  {provider.name}"
+        label = provider.name
         if active:
             label += f"  ({active}/{len(conns)})"
         items.append((label, lambda p=provider: provider_menu(p)))
@@ -223,9 +223,9 @@ def provider_menu(provider) -> ActionResult:
     items: list[tuple[str, callable]] = []
     for conn in provider.connections():
         if conn.active:
-            items.append((f"󰅖  Disconnect {conn.name}", lambda c=conn: provider.disconnect(c)))
+            items.append((f"Disconnect {conn.name}", lambda c=conn: provider.disconnect(c)))
         else:
-            items.append((f"󰈀  Connect {conn.name}", lambda c=conn: guarded_connect(provider, c)))
+            items.append((f"Connect {conn.name}", lambda c=conn: guarded_connect(provider, c)))
     items.extend(provider_actions(provider))
     items.append(("‹ Back", back_to_main))
     run_items(items, prompt=provider.name)
@@ -259,7 +259,7 @@ def happ_menu(provider) -> ActionResult:
     items: list[tuple[str, callable]] = []
     for pname, group in groups.items():
         active = sum(1 for g in group if g["active"])
-        label = f"󰈀  {pname}"
+        label = pname
         if active:
             label += f"  ({active}/{len(group)})"
         items.append((label, lambda p=pname, g=group: happ_provider_menu(provider, p, g)))
@@ -276,7 +276,7 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
     items: list[tuple[str, callable]] = []
     for entry in entries:
         conn = VPNConnection(name=entry["name"], provider="Happ", active=entry["active"])
-        icon = "󰅖  Disconnect" if conn.active else "󰈀  Connect"
+        icon = "Disconnect" if conn.active else "Connect"
         label = f"{icon} {conn.name}"
         info = happmeta.server_info_suffix(conn.name)
         if info:

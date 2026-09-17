@@ -51,14 +51,14 @@ def test_level1_shows_providers_with_counts(monkeypatch):
 
 def test_two_level_connect(monkeypatch):
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
-    patch_menu_env(monkeypatch, [wg], picks=["󰈀  WireGuard", "󰈀  Connect nl"])
+    patch_menu_env(monkeypatch, [wg], picks=["WireGuard", "Connect nl"])
     vpn_manager.run_menu()
     assert wg.connected == ["nl"]
 
 
 def test_two_level_disconnect_active(monkeypatch):
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=True)])
-    patch_menu_env(monkeypatch, [wg], picks=["󰈀  WireGuard  (1/1)", "󰅖  Disconnect nl"])
+    patch_menu_env(monkeypatch, [wg], picks=["WireGuard  (1/1)", "Disconnect nl"])
     vpn_manager.run_menu()
     assert wg.disconnected == ["nl"]
 
@@ -66,7 +66,7 @@ def test_two_level_disconnect_active(monkeypatch):
 def test_back_returns_to_level1(monkeypatch):
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
     # level1 -> WireGuard, level2 -> Back, level1 -> escape
-    patch_menu_env(monkeypatch, [wg], picks=["󰈀  WireGuard", "‹ Back", None])
+    patch_menu_env(monkeypatch, [wg], picks=["WireGuard", "‹ Back", None])
     vpn_manager.run_menu()
     assert wg.connected == []
 
@@ -79,7 +79,7 @@ def test_level1_active_count_label(monkeypatch):
             VPNConnection(name="b", provider="WireGuard", active=False),
         ],
     )
-    picks = iter(["󰈀  WireGuard  (1/2)", None])
+    picks = iter(["WireGuard  (1/2)", None])
     seen_prompts = []
     patch_menu_env(monkeypatch, [wg], picks=[])
     monkeypatch.setattr(
@@ -91,5 +91,5 @@ def test_level1_active_count_label(monkeypatch):
     )
     vpn_manager.run_menu()
     level1_options = seen_prompts[0][1]
-    assert "󰈀  WireGuard  (1/2)" in level1_options
+    assert "WireGuard  (1/2)" in level1_options
     assert any("Killswitch" in o for o in level1_options)

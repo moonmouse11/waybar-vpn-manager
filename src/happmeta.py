@@ -367,16 +367,15 @@ def update_pings() -> None:
 
 
 def server_info_suffix(name: str) -> str:
-    """'42 ms · vless/tcp/reality · host:port' for menu labels."""
+    """'42 ms · trojan/ws' for menu labels — compact, the standard
+    vless/tcp/reality tuple is omitted (it is the common case)."""
     parts = []
     ms = ping_ms(name)
     if ms is not None:
         parts.append(f"{ms:.0f} ms")
     params = server_params(name)
     if params:
-        proto = "/".join(
-            p for p in (params["protocol"], params["network"], params["security"]) if p
-        )
-        parts.append(proto)
-        parts.append(f"{params['host']}:{params['port']}")
+        proto = (params["protocol"], params["network"], params["security"])
+        if proto != ("vless", "tcp", "reality"):
+            parts.append("/".join(p for p in proto if p))
     return " · ".join(parts)

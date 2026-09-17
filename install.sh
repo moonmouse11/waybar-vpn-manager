@@ -71,19 +71,59 @@ cp "$REPO_DIR/waybar/vpn-status.sh" "$WAYBAR_SCRIPTS/vpn-status.sh"
 cp "$REPO_DIR/waybar/vpn-menu.sh"   "$WAYBAR_SCRIPTS/vpn-menu.sh"
 chmod +x "$WAYBAR_SCRIPTS/vpn-status.sh" "$WAYBAR_SCRIPTS/vpn-menu.sh"
 
-# ── Waybar config hint ────────────────────────────────────────────────────────
+# ── Omarchy integration: waybar module + keybinding ──────────────────────────
 
-echo ""
-echo "==> Done! Add this to your ~/.config/waybar/config.jsonc:"
-echo ""
-cat <<'EOF'
-  "custom/vpn": {
+WAYBAR_CONFIG="$HOME/.config/waybar/config.jsonc"
+if [[ -f "$WAYBAR_CONFIG" ]] && ! grep -q '"custom/vpn"' "$WAYBAR_CONFIG"; then
+    echo "==> Adding custom/vpn module to $WAYBAR_CONFIG"
+    python3 - "$WAYBAR_CONFIG" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+module = '''  "custom/vpn": {
     "exec": "~/.config/waybar/scripts/vpn-status.sh",
     "return-type": "json",
     "interval": 3,
     "signal": 11,
-    "on-click": "~/.config/waybar/scripts/vpn-menu.sh",
-  },
+    "on-click": "~/.config/waybar/scripts/vpn-menu.sh"
+  }'''
+lines = text.splitlines(keepends=True)
+for i, line in enumerate(lines):
+    if '"modules-right"' in line and '[' in line:
+        indent = line[: len(line) - len(line.lstrip())] + "  "
+        lines.insert(i + 1, f'{indent}"custom/vpn",\n')
+        break
+text = "".join(lines).rstrip()
+assert text.endswith("}")
+path.write_text(text[:-1] + f",\n{module}\n}}\n")
+PY
+    echo "==> Module inserted."
+else
+    echo "==> waybar module already present or config missing, skipping."
+fi
+
+BINDINGS="$HOME/.config/hypr/bindings.conf"
+if [[ -f "$BINDINGS" ]] && ! grep -q 'waybar-vpn-manager' "$BINDINGS"; then
+    echo "==> Adding SUPER+V binding to $BINDINGS"
+    cat >> "$BINDINGS" <<'EOF'
+
+# >>> waybar-vpn-manager
+bindd = SUPER, V, VPN menu, exec, ~/.config/waybar/scripts/vpn-menu.sh
+# <<< waybar-vpn-manager
 EOF
+else
+    echo "==> keybinding already present or bindings.conf missing, skipping."
+fi
+
+# ── Final hints ───────────────────────────────────────────────────────────────
+
 echo ""
-echo "Then run: omarchy-restart-waybar"
+echo "==> Done!"
+echo "    - waybar module:  inserted automatically (or already present)"
+echo "    - keybinding:     SUPER+V opens the VPN menu"
+echo ""
+echo "    Restart the components:"
+echo "      omarchy restart waybar"
+echo "      hyprctl reload   (or just log out/in)"
