@@ -9,6 +9,7 @@ Usage:
   sudo python3 scripts/happ-mem-census.py [pid]
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -63,6 +64,7 @@ def main() -> None:
                     out.write(f"=== {label} @ {hex(start)}+{m.start()} map={name}\n")
                     out.write(ctx.hex() + "\n")
                     out.write(repr(ctx) + "\n")
+    os.chmod(OUT, 0o600)  # hex context may contain key material
     print(f"scanned {scanned / 1024 / 1024:.0f} MiB, {hits} hits -> {OUT}")
 
 

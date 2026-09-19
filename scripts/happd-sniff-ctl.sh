@@ -9,6 +9,7 @@
 # The capture lands in /tmp/happd-sniff.log (may contain session keys —
 # it stays local, delete it after analysis).
 set -euo pipefail
+umask 077  # captures may contain session keys — never group/other readable
 
 SOCK=/tmp/happd.sock
 REAL=/tmp/happd-real.sock
@@ -25,7 +26,7 @@ start() {
     echo $! > "$PIDFILE"
     sleep 0.5
     [[ -S $SOCK ]] || { echo "proxy failed to start:"; cat "${LOG}.boot"; exit 1; }
-    chmod 644 "$LOG" 2>/dev/null || true
+    chmod 600 "$LOG" 2>/dev/null || true
     echo "sniffing -> $LOG"
     echo "now: fully quit Happ GUI, start it again, press «Connect», wait ~10 s, «Disconnect»"
 }

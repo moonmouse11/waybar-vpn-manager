@@ -59,19 +59,9 @@ if [[ -L /etc/resolv.conf ]]; then
     sudo resolvconf -u
 fi
 
-# ── Copy files ────────────────────────────────────────────────────────────────
-
-echo "==> Installing to $INSTALL_DIR..."
-mkdir -p "$INSTALL_DIR"
-cp -r "$REPO_DIR/src" "$INSTALL_DIR/"
-
-echo "==> Installing waybar scripts to $WAYBAR_SCRIPTS..."
-mkdir -p "$WAYBAR_SCRIPTS"
-cp "$REPO_DIR/waybar/vpn-status.sh" "$WAYBAR_SCRIPTS/vpn-status.sh"
-cp "$REPO_DIR/waybar/vpn-menu.sh"   "$WAYBAR_SCRIPTS/vpn-menu.sh"
-chmod +x "$WAYBAR_SCRIPTS/vpn-status.sh" "$WAYBAR_SCRIPTS/vpn-menu.sh"
-
 # ── Omarchy integration: waybar module + keybinding ──────────────────────────
+# Edits the user's waybar config BEFORE any files are copied/sudoers written,
+# so a broken config.jsonc aborts the install without side effects.
 
 WAYBAR_CONFIG="$HOME/.config/waybar/config.jsonc"
 if [[ -f "$WAYBAR_CONFIG" ]] && ! grep -q '"custom/vpn"' "$WAYBAR_CONFIG"; then
@@ -96,7 +86,9 @@ for i, line in enumerate(lines):
         lines.insert(i + 1, f'{indent}"custom/vpn",\n')
         break
 text = "".join(lines).rstrip()
-assert text.endswith("}")
+if not text.endswith("}"):
+    print(f"error: could not update {path}: expected a JSON object ending with '}}'", file=sys.stderr)
+    sys.exit(1)
 path.write_text(text[:-1] + f",\n{module}\n}}\n")
 PY
     echo "==> Module inserted."
@@ -116,6 +108,18 @@ EOF
 else
     echo "==> keybinding already present or bindings.conf missing, skipping."
 fi
+
+# ── Copy files ────────────────────────────────────────────────────────────────
+
+echo "==> Installing to $INSTALL_DIR..."
+mkdir -p "$INSTALL_DIR"
+cp -r "$REPO_DIR/src" "$INSTALL_DIR/"
+
+echo "==> Installing waybar scripts to $WAYBAR_SCRIPTS..."
+mkdir -p "$WAYBAR_SCRIPTS"
+cp "$REPO_DIR/waybar/vpn-status.sh" "$WAYBAR_SCRIPTS/vpn-status.sh"
+cp "$REPO_DIR/waybar/vpn-menu.sh"   "$WAYBAR_SCRIPTS/vpn-menu.sh"
+chmod +x "$WAYBAR_SCRIPTS/vpn-status.sh" "$WAYBAR_SCRIPTS/vpn-menu.sh"
 
 # ── Final hints ───────────────────────────────────────────────────────────────
 

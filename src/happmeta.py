@@ -13,6 +13,7 @@ on the network.
 
 import copy
 import json
+import os
 import re
 import socket
 import subprocess
@@ -32,6 +33,7 @@ SUB_CACHE_DIR = Path.home() / ".cache/vpn-manager"
 
 PING_MAX_AGE = 300  # seconds
 SUB_MAX_AGE = 3600  # seconds
+SUBS_REFRESH_RETRY = 60  # seconds, avoid spawning a worker per status tick when the tunnel is down
 PING_TIMEOUT = 3.0
 
 MANAGER = Path(__file__).resolve().parent / "vpn_manager.py"
@@ -129,6 +131,7 @@ def providers() -> dict[str, dict]:
     try:
         PROVIDERS_CACHE.parent.mkdir(parents=True, exist_ok=True)
         PROVIDERS_CACHE.write_text(json.dumps({"mtime": mtime, "providers": result}))
+        os.chmod(PROVIDERS_CACHE, 0o600)  # subscription URLs carry access tokens
     except OSError:
         pass
     return result
@@ -171,7 +174,7 @@ def fetch_subscription(sub_id: str, url: str) -> list[dict]:
     except (OSError, json.JSONDecodeError):
         cached = None
 
-    if cached and time.time() - cached.get("at", 0) < SUB_MAX_AGE:
+    if isinstance(cached, dict) and time.time() - cached.get("at", 0) < SUB_MAX_AGE:
         return cached.get("servers", [])
 
     headers = _headers()
@@ -187,13 +190,85 @@ def fetch_subscription(sub_id: str, url: str) -> list[dict]:
                     cache_path.write_text(
                         json.dumps({"at": time.time(), "servers": servers}, ensure_ascii=False)
                     )
+                    os.chmod(cache_path, 0o600)  # configs carry UUIDs and reality keys
                 except OSError:
                     pass
                 return servers
         except (OSError, ValueError):
             pass
 
-    return cached.get("servers", []) if cached else []
+    return cached.get("servers", []) if isinstance(cached, dict) else []
+
+
+def fetch_subscription_cached(sub_id: str) -> list[dict]:
+    """Cache-only read: fresh or stale servers, never touches the network.
+    Used on the waybar --status path so a 3 s tick never blocks on I/O."""
+    try:
+        cached = json.loads(_sub_cache_path(sub_id).read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    return cached.get("servers", []) if isinstance(cached, dict) else []
+
+
+def _sub_cache_fresh(sub_id: str) -> bool:
+    try:
+        cached = json.loads(_sub_cache_path(sub_id).read_text())
+        return time.time() - cached.get("at", 0) < SUB_MAX_AGE
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        return False
+
+
+def _subs_refresh_path() -> Path:
+    return SUB_CACHE_DIR / "subs-refresh.json"
+
+
+def _subs_refresh_in_progress() -> bool:
+    """True while a refresh attempt started recently — running or just failed.
+    Keeps the 3 s status tick from piling up --update-subs workers."""
+    try:
+        state = json.loads(_subs_refresh_path().read_text())
+        return time.time() - state.get("at", 0) < SUBS_REFRESH_RETRY
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        return False
+
+
+def _stamp_subs_refresh() -> None:
+    try:
+        SUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _subs_refresh_path().write_text(json.dumps({"at": time.time()}))
+    except OSError:
+        pass
+
+
+def request_subscription_update() -> None:
+    """Fire-and-forget background subscription refresh if any cache is stale."""
+    if _subs_refresh_in_progress():
+        return
+    for sub_id, prov in providers().items():
+        if prov.get("url") and not _sub_cache_fresh(sub_id):
+            try:
+                subprocess.Popen(
+                    [sys.executable, str(MANAGER), "--update-subs"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError:
+                pass  # a spawn failure must never break --status
+            return
+
+
+def update_subscriptions() -> None:
+    """Background entry point: refresh every subscription cache."""
+    # stamped first, even when fetches fail below: single-flight for the tick
+    _stamp_subs_refresh()
+    for sub_id, prov in providers().items():
+        url = prov.get("url")
+        if url:
+            try:
+                fetch_subscription(sub_id, url)
+            except (OSError, AttributeError, ValueError):
+                pass  # one failing provider must not stop the others
 
 
 # ── Config merge (subscription config -> runnable xray config) ────────────────
@@ -235,15 +310,20 @@ def _configs() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def all_servers() -> list[dict]:
+def all_servers(allow_fetch: bool = True) -> list[dict]:
     """[{name, provider_id, provider_name, config(subscription raw)}] —
-    everything we can connect to, grouped per provider."""
+    everything we can connect to, grouped per provider.
+
+    With allow_fetch=False the subscription caches are read as-is (fresh or
+    stale) and the network is never touched — the waybar --status path.
+    """
     servers = []
     for sub_id, prov in providers().items():
         url = prov.get("url")
         if not url:
             continue
-        for cfg in fetch_subscription(sub_id, url):
+        cfgs = fetch_subscription(sub_id, url) if allow_fetch else fetch_subscription_cached(sub_id)
+        for cfg in cfgs:
             name = cfg.get("remarks") or "?"
             servers.append(
                 {
@@ -268,14 +348,26 @@ def all_servers() -> list[dict]:
     return servers
 
 
+def match_server(name: str, servers: list[dict]) -> dict | None:
+    """The server a name refers to: exact match, or the unique substring
+    match (GUI names from Happ.conf can lack the emoji prefix). None when
+    ambiguous or missing — a prefix must never select the wrong server."""
+    exact = [s for s in servers if name == s["name"]]
+    if exact:
+        return exact[0]
+    subs = [s for s in servers if name in s["name"] or s["name"] in name]
+    return subs[0] if len(subs) == 1 else None
+
+
 def resolve_config(name: str) -> dict | None:
     """Runnable xray config for a server name: merged from the subscription
     when available, otherwise a captured config used as-is."""
-    for server in all_servers():
-        if name == server["name"] or name in server["name"] or server["name"] in name:
-            if server["provider_id"]:
-                return build_runtime_config(server["config"])
-            return server["config"]  # captured fallback
+    servers = all_servers()
+    server = match_server(name, servers)
+    if server is not None:
+        if server["provider_id"]:
+            return build_runtime_config(server["config"])
+        return server["config"]  # captured fallback
     return _configs().get(name)
 
 
@@ -288,17 +380,33 @@ def server_params(name: str) -> dict | None:
     if not cfg:
         return None
     try:
-        outbound = next(o for o in cfg["outbounds"] if o.get("protocol") == "vless")
-        vnext = outbound["settings"]["vnext"][0]
+        # vless preferred; trojan/shadowsocks fall back to the first real
+        # server outbound so every protocol keeps its ping + label info
+        outbound = next(
+            (o for o in cfg["outbounds"] if o.get("protocol") == "vless"),
+            None,
+        ) or next(
+            (o for o in cfg["outbounds"] if o.get("protocol") not in ("dns", "freedom")),
+            None,
+        )
+        if outbound is None:
+            return None
+        settings = outbound.get("settings", {})
+        if "vnext" in settings:  # vless / vmess
+            target = settings["vnext"][0]
+        elif "servers" in settings:  # trojan / shadowsocks
+            target = settings["servers"][0]
+        else:
+            return None
         stream = outbound.get("streamSettings", {})
         return {
-            "host": vnext["address"],
-            "port": vnext["port"],
+            "host": target["address"],
+            "port": target["port"],
             "protocol": outbound["protocol"],
             "network": stream.get("network", "tcp"),
             "security": stream.get("security", ""),
         }
-    except (KeyError, IndexError, StopIteration, TypeError):
+    except (KeyError, IndexError, TypeError):
         return None
 
 

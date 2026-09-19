@@ -125,9 +125,17 @@ def disconnect_all() -> ActionResult:
     # act on everything, even providers hidden from the menu
     for provider in ALL_PROVIDERS:
         for conn in provider.connections():
-            if conn.active:
-                result = provider.disconnect(conn)
-                (stopped if result.success else failed).append(f"{provider.name}: {conn.name}")
+            if not conn.active:
+                continue
+            result = provider.disconnect(conn)
+            if result.success:
+                stopped.append(f"{provider.name}: {conn.name}")
+            elif not any(c.active for c in provider.connections()):
+                # reported failure, but nothing is up anymore — e.g. one
+                # Happ disconnect stops every happd process at once
+                stopped.append(f"{provider.name}: {conn.name}")
+            else:
+                failed.append(f"{provider.name}: {conn.name}")
     if failed:
         return ActionResult(False, "Failed: " + ", ".join(failed))
     message = ", ".join(stopped) if stopped else "nothing was active"
@@ -228,7 +236,7 @@ def provider_menu(provider) -> ActionResult:
             items.append((f"Connect {conn.name}", lambda c=conn: guarded_connect(provider, c)))
     items.extend(provider_actions(provider))
     items.append(("‹ Back", back_to_main))
-    run_items(items, prompt=provider.name)
+    run_items(_unique_labels(items), prompt=provider.name)
     # The submenu already notified/refreshed; stay silent for the parent level.
     return ActionResult(True, "")
 
@@ -247,11 +255,12 @@ def happ_menu(provider) -> ActionResult:
     servers = happmeta.all_servers()
     active_names = {c.name for c in provider.connections() if c.active}
 
+    # Exact match, or the unique substring match (GUI names can lack the
+    # emoji prefix); ambiguous prefixes mark nothing.
+    matched = {m["name"] for a in active_names if (m := happmeta.match_server(a, servers))}
     groups: dict[str, list] = {}
     for server in servers:
-        is_active = any(
-            a == server["name"] or a in server["name"] or server["name"] in a for a in active_names
-        )
+        is_active = server["name"] in matched
         groups.setdefault(server["provider_name"], []).append(
             {"name": server["name"], "active": is_active}
         )
@@ -286,8 +295,35 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
         else:
             items.append((label, lambda c=conn: guarded_connect(provider, c)))
     items.append(("‹ Back", lambda: happ_menu(provider)))
-    run_items(items, prompt=pname[:40])
+    run_items(_unique_labels(items), prompt=pname[:40])
     return ActionResult(True, "")
+
+
+def _unique_labels(items: list[tuple[str, callable]]) -> list[tuple[str, callable]]:
+    """Disambiguate repeated labels so every menu entry stays reachable.
+
+    Two servers can render identically (same remarks + same info suffix) and
+    walker picks by label text — without this the later entry could never be
+    selected. First occurrence keeps its label; repeats get " (2)", " (3)"…"""
+    seen: set[str] = set()
+    counts: dict[str, int] = {}
+    unique = []
+    for label, action in items:
+        if label not in seen:
+            seen.add(label)
+            unique.append((label, action))
+            continue
+        # loop the suffix upward: a generated " (2)" can collide with a
+        # genuine later label like "Same (2)"
+        n = counts.get(label, 1) + 1
+        candidate = f"{label} ({n})"
+        while candidate in seen:
+            n += 1
+            candidate = f"{label} ({n})"
+        counts[label] = n
+        seen.add(candidate)
+        unique.append((candidate, action))
+    return unique
 
 
 def run_items(items: list[tuple[str, callable]], prompt: str) -> ActionResult:
@@ -392,6 +428,11 @@ def main():
         action="store_true",
         help="Refresh Happ server ping cache in the background (internal)",
     )
+    group.add_argument(
+        "--update-subs",
+        action="store_true",
+        help="Refresh Happ subscription caches in the background (internal)",
+    )
     args = parser.parse_args()
 
     if args.status:
@@ -402,6 +443,8 @@ def main():
         ipinfo.update(args.update_ip)
     elif args.update_ping:
         happmeta.update_pings()
+    elif args.update_subs:
+        happmeta.update_subscriptions()
     elif args.happ_keeper is not None:
         from providers.happ import run_keeper
 

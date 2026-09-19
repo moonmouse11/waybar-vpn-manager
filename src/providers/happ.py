@@ -29,6 +29,7 @@ status always work headless via happd.
 """
 
 import json
+import os
 import socket
 import struct
 import subprocess
@@ -191,6 +192,21 @@ def _read_keeper_state() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _write_own_keeper_state(state: dict) -> None:
+    """Write keeper state only while no other keeper owns the state file.
+
+    On a server switch a stale keeper can exit (or fail) after a new keeper
+    already wrote its own state — it must not clobber the newer keeper's
+    "connected" with its own "exited"/"error". Ownership is the keeper pid
+    recorded in the state; a file without a pid predates this scheme and is
+    freely replaceable. (Read-check-write is not atomic; the window is a
+    menu-action timescale race, acceptable here.)"""
+    current = _read_keeper_state()
+    if current is not None and current.get("pid", state["pid"]) != state["pid"]:
+        return
+    _write_keeper_state(state)
+
+
 def _open_session() -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(SOCKET_TIMEOUT)
@@ -235,14 +251,18 @@ def run_keeper(server_name: str | None = None) -> None:
     polls that file for the outcome.
     """
     logutil.log(f"keeper: starting ({server_name or 'last server'})")
-    state: dict = {"status": "connecting"}
+    state: dict = {"status": "connecting", "pid": os.getpid()}
+    # Unconditional claim: _headless_connect just unlinked KEEPER_STATE and
+    # designated this process, so a stale keeper's error/"exited" writes must
+    # not win the file in the gap between unlink and this first write —
+    # otherwise every later state of ours gets dropped (guarded by pid).
     _write_keeper_state(state)
     sock: socket.socket | None = None
     try:
         cfg = happmeta.resolve_config(server_name or (_last_server_name() or ""))
         if cfg is None:
             state.update(status="error", message="no config for this server")
-            _write_keeper_state(state)
+            _write_own_keeper_state(state)
             return
 
         iface = _tun_interface_name(cfg)
@@ -268,15 +288,15 @@ def run_keeper(server_name: str | None = None) -> None:
                 if frame.get("status") in ("started", "success"):
                     break
                 state.update(status="error", message=frame.get("error", str(frame)))
-                _write_keeper_state(state)
+                _write_own_keeper_state(state)
                 return
         else:
             state.update(status="error", message="no response from happd")
-            _write_keeper_state(state)
+            _write_own_keeper_state(state)
             return
 
         state.update(status="connected", server=cfg.get("remarks"))
-        _write_keeper_state(state)
+        _write_own_keeper_state(state)
         logutil.log(f"keeper: connected ({state['server']})")
 
         # Hold the session open; exit when the tunnel disappears.
@@ -294,16 +314,16 @@ def run_keeper(server_name: str | None = None) -> None:
         logutil.log(f"keeper: session error: {e}")
         if state.get("status") == "connecting":
             state.update(status="error", message=str(e))
-            _write_keeper_state(state)
+            _write_own_keeper_state(state)
     except Exception as e:  # noqa: BLE001 - always record keeper failures
         logutil.log(f"keeper: unexpected error: {e}")
         state.update(status="error", message=str(e))
-        _write_keeper_state(state)
+        _write_own_keeper_state(state)
     finally:
         if sock:
             sock.close()
         state.update(status="exited")
-        _write_keeper_state(state)
+        _write_own_keeper_state(state)
         logutil.log("keeper: exited")
 
 
@@ -318,7 +338,10 @@ class HappProvider(VPNProvider):
         is_active = bool(interfaces or processes)
 
         # Full server list from provider subscriptions (+ captured extras).
-        servers = happmeta.all_servers()
+        # Cache-only on this hot path: --status runs every 3 s and must never
+        # block on the network; a background worker refreshes stale caches.
+        happmeta.request_subscription_update()
+        servers = happmeta.all_servers(allow_fetch=False)
         if not servers:
             return [
                 VPNConnection(
@@ -338,12 +361,13 @@ class HappProvider(VPNProvider):
             if not active_name:
                 active_name = _last_server_name()
 
+        # Exact match, or the unique substring match (GUI names can lack
+        # the emoji prefix); ambiguous prefixes mark nothing.
+        matched = happmeta.match_server(active_name, servers) if active_name else None
         conns = []
         for server in servers:
             name = server["name"]
-            conn_active = bool(
-                active_name and (name == active_name or name in active_name or active_name in name)
-            )
+            conn_active = matched is not None and name == matched["name"]
             conns.append(
                 VPNConnection(
                     name=name,
@@ -417,7 +441,10 @@ class HappProvider(VPNProvider):
             time.sleep(0.3)
 
     def _headless_connect(self, server_name: str) -> ActionResult:
-        """Spawn the keeper process and wait for its verdict (max ~6 s)."""
+        """Spawn the keeper process and wait for its verdict.
+
+        The keeper allows ~8 s for happd's start ack before it reports an
+        error, so poll a while longer than that before giving up ourselves."""
         KEEPER_STATE.unlink(missing_ok=True)
         manager = Path(__file__).resolve().parent.parent / "vpn_manager.py"
         subprocess.Popen(
@@ -426,7 +453,7 @@ class HappProvider(VPNProvider):
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        deadline = time.time() + 6
+        deadline = time.time() + 12
         while time.time() < deadline:
             state = _read_keeper_state()
             if state:

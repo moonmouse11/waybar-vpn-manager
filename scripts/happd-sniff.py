@@ -6,6 +6,7 @@ Frame format (both directions): 4-byte big-endian length + UTF-8 JSON payload.
 Log: /tmp/happd-sniff.log
 """
 
+import os
 import socket
 import struct
 import threading
@@ -57,6 +58,9 @@ def pipe(src: socket.socket, dst: socket.socket, direction: str) -> None:
 def main() -> None:
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(LISTEN)
+    # the ctl script runs under umask 077, which would make the socket 0700
+    # root and deny the unprivileged Happ GUI — it must stay world-writable
+    os.chmod(LISTEN, 0o666)
     server.listen(8)
     print("happd-sniff: proxy listening", flush=True)
     while True:

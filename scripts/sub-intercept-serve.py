@@ -9,6 +9,7 @@ Usage:
   sudo python3 scripts/sub-intercept-serve.py xskx.artemida.live
 """
 
+import os
 import socket
 import ssl
 import sys
@@ -58,6 +59,7 @@ def main() -> None:
                     body += chunk
                 captured = request_line + head + b"\r\n\r\n" + body
                 (WORKDIR / "request.txt").write_bytes(captured)
+                os.chmod(WORKDIR / "request.txt", 0o600)  # carries auth tokens
                 print("\n=== captured request ===")
                 print(captured.decode("utf-8", errors="replace"))
                 print("========================")
