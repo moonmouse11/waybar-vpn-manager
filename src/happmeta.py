@@ -12,6 +12,7 @@ on the network.
 """
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -83,6 +84,8 @@ CATCH_ALL_RULE = {"network": "tcp,udp", "outboundTag": "proxy"}
 def _parse_providers() -> dict[str, dict]:
     """subscription id -> {"name": str, "url": str | None}."""
     id_url: dict[str, str] = {}
+    id_pos: dict[str, int] = {}  # last 'starting update from' position per id
+    added_urls: list[tuple[int, str]] = []  # (position, url), log order
     url_name: dict[str, str] = {}
     try:
         text = LOG_FILE.read_text(errors="replace")
@@ -90,18 +93,69 @@ def _parse_providers() -> dict[str, dict]:
         text = ""
     for m in re.finditer(r"Subscription #(-?\d+) starting update from: (\S+)", text):
         id_url[m.group(1)] = m.group(2)
+        id_pos[m.group(1)] = m.start()
+    # Newly added subscriptions log no id line — only this. The numeric id is
+    # not available unencrypted (subs.db is AES-GCM), so synthesize a stable
+    # id from the url; a later real id line for the same url always wins.
+    for m in re.finditer(r"Subscription being added: (\S+)", text):
+        added_urls.append((m.start(), m.group(1)))
     for m in re.finditer(r"\](?: ?\[[^\]]+\])* ?(.+?) fetching subscription from (\S+)", text):
         name = m.group(1).strip()
         if name:
             url_name[m.group(2)] = name
 
-    providers: dict[str, dict] = {}
-    for sub_id, url in id_url.items():
+    def _resolve_name(url: str, fallback: str) -> str:
         name = url_name.get(url)
         if not name:
             host = re.sub(r"^https?://", "", url).split("/")[0]
             name = next((n for u, n in url_name.items() if host in u), None)
-        providers[sub_id] = {"name": name or f"Subscription {sub_id}", "url": url}
+        return name or fallback
+
+    host_ids: dict[str, list[str]] = {}
+    for sub_id, url in id_url.items():
+        host = re.sub(r"^https?://", "", url).split("/")[0]
+        host_ids.setdefault(host, []).append(sub_id)
+
+    def _path_prefix_len(a: str, b: str) -> int:
+        """Shared prefix length of url paths (scheme+host stripped) —
+        /cart/TOKEN1 vs /cart/TOKEN2 share more than /a vs /cart/... ."""
+        ra = re.sub(r"^https?://[^/]+", "", a)
+        rb = re.sub(r"^https?://[^/]+", "", b)
+        n = 0
+        for ca, cb in zip(ra, rb):
+            if ca != cb:
+                break
+            n += 1
+        return n
+
+    synth: dict[str, str] = {}  # host -> url (last wins)
+    for pos, url in added_urls:
+        if url in id_url.values():
+            continue
+        host = re.sub(r"^https?://", "", url).split("/")[0]
+        ids = host_ids.get(host)
+        if ids:
+            # Re-added with a fresh token for a host Happ already updates
+            # under real id(s). Happ's own newest log line is ground truth:
+            # an added line older than the host's latest real update line is
+            # stale and must not regress (or duplicate) the provider.
+            newest_real = max(id_pos[i] for i in ids)
+            if pos < newest_real:
+                continue
+            # Path-aware pick: the id whose current url shares the longest
+            # path prefix with the added url — a sibling subscription on the
+            # same host must not swallow another's rotated token.
+            real_id = max(ids, key=lambda i: _path_prefix_len(id_url[i], url))
+            id_url[real_id] = url
+            continue
+        synth[host] = url
+
+    providers: dict[str, dict] = {}
+    for sub_id, url in id_url.items():
+        providers[sub_id] = {"name": _resolve_name(url, f"Subscription {sub_id}"), "url": url}
+    for host, url in synth.items():
+        sub_id = "h" + hashlib.sha1(url.encode()).hexdigest()[:10]
+        providers[sub_id] = {"name": _resolve_name(url, host), "url": url}
 
     # Fallback names from routing.json (routing names per subscription)
     try:
@@ -115,6 +169,9 @@ def _parse_providers() -> dict[str, dict]:
     return providers
 
 
+PROVIDERS_CACHE_VERSION = 2  # bump when _parse_providers learns new log shapes
+
+
 def providers() -> dict[str, dict]:
     """id -> {"name", "url"}, cached by the log's mtime."""
     try:
@@ -123,14 +180,18 @@ def providers() -> dict[str, dict]:
         mtime = 0
     try:
         cache = json.loads(PROVIDERS_CACHE.read_text())
-        if cache.get("mtime") == mtime:
+        if cache.get("version") == PROVIDERS_CACHE_VERSION and cache.get("mtime") == mtime:
             return cache.get("providers", {})
     except (OSError, json.JSONDecodeError):
         pass
     result = _parse_providers()
     try:
         PROVIDERS_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        PROVIDERS_CACHE.write_text(json.dumps({"mtime": mtime, "providers": result}))
+        PROVIDERS_CACHE.write_text(
+            json.dumps(
+                {"version": PROVIDERS_CACHE_VERSION, "mtime": mtime, "providers": result}
+            )
+        )
         os.chmod(PROVIDERS_CACHE, 0o600)  # subscription URLs carry access tokens
     except OSError:
         pass
@@ -174,7 +235,14 @@ def fetch_subscription(sub_id: str, url: str) -> list[dict]:
     except (OSError, json.JSONDecodeError):
         cached = None
 
-    if isinstance(cached, dict) and time.time() - cached.get("at", 0) < SUB_MAX_AGE:
+    # Fresh only for THIS url: after a token rotation the record may hold a
+    # fresh cache fetched with the old url. Records without "url" predate
+    # this scheme and are treated as matching (no mass refetch).
+    if (
+        isinstance(cached, dict)
+        and cached.get("url", url) == url
+        and time.time() - cached.get("at", 0) < SUB_MAX_AGE
+    ):
         return cached.get("servers", [])
 
     headers = _headers()
@@ -188,7 +256,10 @@ def fetch_subscription(sub_id: str, url: str) -> list[dict]:
                 try:
                     SUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                     cache_path.write_text(
-                        json.dumps({"at": time.time(), "servers": servers}, ensure_ascii=False)
+                        json.dumps(
+                            {"at": time.time(), "url": url, "servers": servers},
+                            ensure_ascii=False,
+                        )
                     )
                     os.chmod(cache_path, 0o600)  # configs carry UUIDs and reality keys
                 except OSError:
@@ -210,10 +281,14 @@ def fetch_subscription_cached(sub_id: str) -> list[dict]:
     return cached.get("servers", []) if isinstance(cached, dict) else []
 
 
-def _sub_cache_fresh(sub_id: str) -> bool:
+def _sub_cache_fresh(sub_id: str, url: str) -> bool:
     try:
         cached = json.loads(_sub_cache_path(sub_id).read_text())
-        return time.time() - cached.get("at", 0) < SUB_MAX_AGE
+        return (
+            isinstance(cached, dict)
+            and cached.get("url", url) == url  # legacy records without url match
+            and time.time() - cached.get("at", 0) < SUB_MAX_AGE
+        )
     except (OSError, json.JSONDecodeError, AttributeError, TypeError):
         return False
 
@@ -245,7 +320,7 @@ def request_subscription_update() -> None:
     if _subs_refresh_in_progress():
         return
     for sub_id, prov in providers().items():
-        if prov.get("url") and not _sub_cache_fresh(sub_id):
+        if prov.get("url") and not _sub_cache_fresh(sub_id, prov["url"]):
             try:
                 subprocess.Popen(
                     [sys.executable, str(MANAGER), "--update-subs"],

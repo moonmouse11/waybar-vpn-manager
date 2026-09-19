@@ -5,7 +5,7 @@ A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with suppor
 Built for Arch Linux with Hyprland / [Omarchy](https://omarchy.org/).
 
 Two-level walker menu (omarchy-style): pick a provider → pick a connection.
-Opens with a **SUPER+V** shortcut or a waybar click.
+Opens with a **SUPER+Shift+V** shortcut or a waybar click.
 
 ## Features
 
@@ -50,7 +50,7 @@ The installer:
 3. Installs the `happ-killswitch` script root-owned to `/usr/local/bin`
 4. Copies sources to `~/.config/waybar/vpn-manager/`, wrappers to `~/.config/waybar/scripts/`
 5. Inserts the `custom/vpn` module into `~/.config/waybar/config.jsonc` (skipped if present)
-6. Appends a `SUPER+V` binding to `~/.config/hypr/bindings.conf` (idempotent)
+6. Appends a `SUPER+Shift+V` binding to `~/.config/hypr/bindings.conf` (idempotent)
 
 Then restart:
 
@@ -70,7 +70,7 @@ provider appear automatically.
 
 ## Usage
 
-- **SUPER+V** or waybar click → menu
+- **SUPER+Shift+V** or waybar click → menu
 - Status tooltip: traffic, exit IP + country
 - Logs: `~/.local/state/vpn-manager/vpn-manager.log`
 - Caches: `~/.cache/vpn-manager/` (exit IP, pings, subscriptions)
@@ -152,4 +152,4 @@ make uninstall
 ```
 
 Removes installed files and the sudoers rule. The waybar module block and the
-SUPER+V binding are left in place (remove manually if wanted).
+SUPER+Shift+V bindings are left in place (remove manually if wanted).

@@ -98,11 +98,11 @@ fi
 
 BINDINGS="$HOME/.config/hypr/bindings.conf"
 if [[ -f "$BINDINGS" ]] && ! grep -q 'waybar-vpn-manager' "$BINDINGS"; then
-    echo "==> Adding SUPER+V binding to $BINDINGS"
+    echo "==> Adding SUPER+Shift+V binding to $BINDINGS"
     cat >> "$BINDINGS" <<'EOF'
 
 # >>> waybar-vpn-manager
-bindd = SUPER, V, VPN menu, exec, ~/.config/waybar/scripts/vpn-menu.sh
+bindd = SUPER SHIFT, V, VPN menu, exec, ~/.config/waybar/scripts/vpn-menu.sh
 # <<< waybar-vpn-manager
 EOF
 else
@@ -126,7 +126,7 @@ chmod +x "$WAYBAR_SCRIPTS/vpn-status.sh" "$WAYBAR_SCRIPTS/vpn-menu.sh"
 echo ""
 echo "==> Done!"
 echo "    - waybar module:  inserted automatically (or already present)"
-echo "    - keybinding:     SUPER+V opens the VPN menu"
+echo "    - keybinding:     SUPER+Shift+V opens the VPN menu"
 echo ""
 echo "    Restart the components:"
 echo "      omarchy restart waybar"

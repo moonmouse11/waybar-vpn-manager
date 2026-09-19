@@ -1,3 +1,4 @@
+import hashlib
 import json
 import time
 
@@ -44,6 +45,111 @@ def test_parse_providers_reads_real_log(tmp_path, monkeypatch):
     assert providers["7"] == {"name": "MyProv", "url": "https://sub.com/123"}
     # known id without a log url: name only, from routing.json
     assert providers["42"] == {"name": "LegacyRouting", "url": None}
+
+
+def _added_providers(tmp_path, monkeypatch, log_text):
+    log = tmp_path / "subscription_log.txt"
+    log.write_text(log_text)
+    routing = tmp_path / "routing.json"
+    routing.write_text(json.dumps({"routings": []}))
+    monkeypatch.setattr(happmeta, "LOG_FILE", log)
+    monkeypatch.setattr(happmeta, "ROUTING_FILE", routing)
+    return happmeta._parse_providers()
+
+
+def test_parse_providers_added_subscription(tmp_path, monkeypatch):
+    """Newly added subscriptions log `Subscription being added: <url>` with no
+    id line — they must appear with a stable synthesized id and resolved name."""
+    log_text = (
+        "[20.09.2026 02:15:22] Subscription being added: "
+        "https://shop.wirecat.link/cart/TOKEN\n"
+        "[20.09.2026 02:15:22] [UPDATE][INFO] "
+        "WireCat fetching subscription from shop.wirecat.link\n"
+    )
+    providers = _added_providers(tmp_path, monkeypatch, log_text)
+    (sub_id,) = [i for i, p in providers.items() if "wirecat" in p["url"]]
+    assert sub_id == "h" + hashlib.sha1(
+        "https://shop.wirecat.link/cart/TOKEN".encode()
+    ).hexdigest()[:10]
+    assert providers[sub_id] == {
+        "name": "WireCat",
+        "url": "https://shop.wirecat.link/cart/TOKEN",
+    }
+    # deterministic across runs/parses (on-disk cache stays valid)
+    assert _added_providers(tmp_path, monkeypatch, log_text) == providers
+
+
+def test_parse_providers_added_url_dedupes_real_id(tmp_path, monkeypatch):
+    """A url with both a real id line and a `being added` line yields one
+    provider keyed by the real id."""
+    providers = _added_providers(
+        tmp_path,
+        monkeypatch,
+        "[20.09.2026 02:15:12] Subscription #42 starting update from: https://sub.com/123\n"
+        "[20.09.2026 02:15:12] Subscription being added: https://sub.com/123\n",
+    )
+    assert providers == {"42": {"name": "Subscription 42", "url": "https://sub.com/123"}}
+
+
+def test_parse_providers_readded_url_updates_real_id(tmp_path, monkeypatch):
+    """A provider re-added with a fresh token for a host that already has a
+    real id keeps the stable id and adopts the newest url — no duplicate
+    provider group."""
+    providers = _added_providers(
+        tmp_path,
+        monkeypatch,
+        "[18.09.2026 01:48:27] Subscription #7 starting update from: https://a.com/t1\n"
+        "[20.09.2026 02:15:22] Subscription being added: https://a.com/t2\n",
+    )
+    assert providers == {"7": {"name": "Subscription 7", "url": "https://a.com/t2"}}
+
+
+def test_parse_providers_readded_picks_path_matching_id(tmp_path, monkeypatch):
+    """Two real ids on one host + a re-added url: the id whose current url
+    shares the longest path prefix adopts it — a sibling subscription on the
+    same host must not swallow another's rotated token."""
+    providers = _added_providers(
+        tmp_path,
+        monkeypatch,
+        "[18.09.2026 01:00:00] Subscription #1 starting update from: https://host.com/a\n"
+        "[18.09.2026 01:00:01] Subscription #2 starting update from: https://host.com/b\n"
+        "[20.09.2026 02:15:22] Subscription being added: https://host.com/b2\n",
+    )
+    assert providers == {
+        "1": {"name": "Subscription 1", "url": "https://host.com/a"},
+        "2": {"name": "Subscription 2", "url": "https://host.com/b2"},
+    }
+
+
+def test_parse_providers_stale_added_line_ignored(tmp_path, monkeypatch):
+    """An added line OLDER than the host's newest real update line is stale:
+    the real url must survive and no synthesized provider appears for it."""
+    providers = _added_providers(
+        tmp_path,
+        monkeypatch,
+        "[18.09.2026 01:48:27] Subscription #7 starting update from: https://a.com/t1\n"
+        "[19.09.2026 02:00:00] Subscription being added: https://a.com/t2\n"
+        "[20.09.2026 02:15:12] Subscription #7 starting update from: https://a.com/t3\n",
+    )
+    assert providers == {"7": {"name": "Subscription 7", "url": "https://a.com/t3"}}
+
+
+def test_parse_providers_added_without_name_uses_host(tmp_path, monkeypatch):
+    """Added url with no matching `fetching subscription from` line: the host
+    is the display name."""
+    providers = _added_providers(
+        tmp_path,
+        monkeypatch,
+        "[20.09.2026 02:18:49] Subscription being added: https://sub.kushmakers.org/new/TOK\n",
+    )
+    (sub_id,) = providers.keys()
+    assert sub_id == "h" + hashlib.sha1(
+        "https://sub.kushmakers.org/new/TOK".encode()
+    ).hexdigest()[:10]
+    assert providers[sub_id] == {
+        "name": "sub.kushmakers.org",
+        "url": "https://sub.kushmakers.org/new/TOK",
+    }
 
 
 def test_server_params_trojan_fallback(tmp_path, monkeypatch):
@@ -311,6 +417,55 @@ def test_update_pings(tmp_path, monkeypatch):
     data = json.loads(ping_file.read_text())
     assert data["srv"]["ms"] == 1.5
     assert "updated_at" in data
+
+
+def test_fetch_subscription_cache_url_revalidation(tmp_path, monkeypatch):
+    """After a token rotation a fresh cache record fetched with the old url
+    must be treated as stale (refetch); legacy records without "url" still
+    count as fresh."""
+    monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)
+    headers_file = tmp_path / "headers.json"
+    headers_file.write_text(json.dumps({"User-Agent": "Happ/1.0"}))
+    monkeypatch.setattr(happmeta, "HEADERS_FILE", headers_file)
+
+    class FakeResp:
+        def __init__(self, remark):
+            self._remark = remark
+
+        def read(self):
+            return json.dumps(
+                [{"remarks": self._remark, "outbounds": [{}]}]
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    # fresh record, mismatched url -> refetch happens, new servers returned
+    (tmp_path / "subscription-1.json").write_text(
+        json.dumps(
+            {"at": time.time(), "url": "https://x/old", "servers": [{"remarks": "old"}]}
+        )
+    )
+    monkeypatch.setattr(
+        happmeta.urllib.request, "urlopen", lambda req, timeout: FakeResp("new")
+    )
+    servers = happmeta.fetch_subscription("1", "https://x/new")
+    assert [s["remarks"] for s in servers] == ["new"]
+
+    # legacy record without "url" -> still fresh, no refetch (urlopen unused)
+    (tmp_path / "subscription-2.json").write_text(
+        json.dumps({"at": time.time(), "servers": [{"remarks": "legacy"}]})
+    )
+    monkeypatch.setattr(
+        happmeta.urllib.request,
+        "urlopen",
+        lambda req, timeout: (_ for _ in ()).throw(AssertionError("refetched legacy")),
+    )
+    servers = happmeta.fetch_subscription("2", "https://x/new")
+    assert [s["remarks"] for s in servers] == ["legacy"]
 
 
 def test_fetch_subscription_non_dict_cache_returns_empty(tmp_path, monkeypatch):
