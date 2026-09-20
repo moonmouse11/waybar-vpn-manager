@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from .base import ActionResult, VPNConnection, VPNProvider
+from .base import ActionResult, VPNConnection, VPNProvider, read_config_text
 
 OVPN_DIR = Path("/etc/openvpn/client")
 PID_DIR = Path("/run/openvpn")
@@ -26,6 +26,29 @@ def _is_running(profile: str) -> bool:
         return Path(f"/proc/{pid}").exists()
     except (ValueError, OSError):
         return False
+
+
+def ovpn_endpoint(conf_path) -> tuple[str, int] | None:
+    """(host, port) of the first valid 'remote host port' directive.
+
+    A remote without a numeric port, or commented out (; or #), yields None.
+    The port must be <= 65535 — socket.create_connection raises
+    OverflowError beyond that, which would abort a whole ping sweep."""
+    text = read_config_text(conf_path)
+    if text is None:
+        return None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith((";", "#")):
+            continue
+        parts = s.split()
+        if parts[0].lower() != "remote":
+            continue
+        if len(parts) < 3 or not parts[2].isdigit():
+            return None  # first remote unusable -> no endpoint for this config
+        port = int(parts[2])
+        return (parts[1], port) if port <= 65535 else None
+    return None
 
 
 class OpenVPNProvider(VPNProvider):
@@ -53,6 +76,16 @@ class OpenVPNProvider(VPNProvider):
             )
 
         return result
+
+    def ping_targets(self) -> list[tuple[str, str, int]]:
+        targets = []
+        for conn in self.connections():
+            if not conn.config_path:
+                continue
+            ep = ovpn_endpoint(conn.config_path)
+            if ep:
+                targets.append((conn.name, ep[0], ep[1]))
+        return targets
 
     def connect(self, connection: VPNConnection) -> ActionResult:
         _run(["sudo", "mkdir", "-p", str(PID_DIR)])

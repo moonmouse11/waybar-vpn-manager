@@ -20,12 +20,23 @@ SUDOERS_FILE="/etc/sudoers.d/vpn-manager"
 # Rules are narrowed to the exact call patterns used by the providers:
 #   wg-quick up/down <profile>, openvpn --config/--daemon/--writepid,
 #   mkdir/rm/cp/chmod only under /run/openvpn, /etc/wireguard, /etc/openvpn/client,
+#   cat on the same config globs (menu-imported configs are root:0600 — the
+#   background ping sweep reads endpoints via 'sudo -n cat'),
 #   systemctl enable/disable wg-quick@*, happ-killswitch (root-owned script).
 # `kill <pid>` stays broad (arbitrary numeric PIDs cannot be pattern-matched).
+# THREAT MODEL: sudoers matches command arguments lexically and `*` spans
+# `/` and `..`, so `sudo -n cat /etc/wireguard/../../../etc/shadow` matches
+# the cat rules below — i.e. the cat entries are equivalent to root read
+# access, and together with the unbounded `cp *` source they allow reading
+# back any root file the user could copy there. Accepted deliberately: this
+# installer targets a single-user machine whose owner already runs it with
+# full interactive sudo (pacman, tee into /etc/sudoers.d, ...), so the owner
+# is root-equivalent anyway; the rules only remove a password prompt. Remove
+# the two cat entries if that trade-off is unacceptable.
 # If a narrowed rule ever blocks a legit call, fall back to the broad form:
 #   ... NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn, /usr/bin/kill, /usr/bin/mkdir, /usr/bin/rm, /usr/bin/cp, /usr/bin/chmod, ...
 echo "==> Writing sudoers rule..."
-echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn --config * --daemon --writepid /run/openvpn/client-*.pid, /usr/bin/kill, /usr/bin/mkdir -p /run/openvpn, /usr/bin/rm -f /run/openvpn/client-*.pid, /usr/bin/rm -f /etc/wireguard/*.conf, /usr/bin/cp * /etc/wireguard/*, /usr/bin/cp * /etc/openvpn/client/*, /usr/bin/chmod 600 /etc/wireguard/*, /usr/bin/chmod 600 /etc/openvpn/client/*, /usr/bin/systemctl enable wg-quick@*, /usr/bin/systemctl disable wg-quick@*, /usr/local/bin/happ-killswitch" \
+echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn --config * --daemon --writepid /run/openvpn/client-*.pid, /usr/bin/kill, /usr/bin/mkdir -p /run/openvpn, /usr/bin/rm -f /run/openvpn/client-*.pid, /usr/bin/rm -f /etc/wireguard/*.conf, /usr/bin/cp * /etc/wireguard/*, /usr/bin/cp * /etc/openvpn/client/*, /usr/bin/chmod 600 /etc/wireguard/*, /usr/bin/chmod 600 /etc/openvpn/client/*, /usr/bin/cat /etc/wireguard/*, /usr/bin/cat /etc/openvpn/client/*, /usr/bin/systemctl enable wg-quick@*, /usr/bin/systemctl disable wg-quick@*, /usr/local/bin/happ-killswitch" \
     | sudo tee "$SUDOERS_FILE" > /dev/null
 sudo chmod 440 "$SUDOERS_FILE"
 sudo visudo -cf "$SUDOERS_FILE" > /dev/null && echo "==> sudoers rule validated"

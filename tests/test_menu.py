@@ -109,6 +109,103 @@ def test_happ_provider_menu_disambiguates_duplicate_labels(monkeypatch):
     assert provider.connected == [made[1]]
 
 
+def _happ_menu_setup(monkeypatch, tmp_path, pings):
+    """Drive happ_menu with stubbed servers; return the captured option list."""
+    servers = [
+        {"name": "s1", "provider_name": "P1", "provider_id": "1", "config": {}},
+        {"name": "s2", "provider_name": "P1", "provider_id": "1", "config": {}},
+        {"name": "s3", "provider_name": "P2", "provider_id": "2", "config": {}},
+    ]
+    provider = FakeProvider(
+        "Happ", [VPNConnection(name="s1", provider="Happ", active=True)]
+    )
+    monkeypatch.setattr(vpn_manager.happmeta, "request_ping_update", lambda: None)
+    monkeypatch.setattr(vpn_manager.happmeta, "all_servers", lambda: servers)
+    ping_file = tmp_path / "ping.json"
+    monkeypatch.setattr(vpn_manager.happmeta, "PING_CACHE", ping_file)
+    if pings is not None:
+        ping_file.write_text(pings)
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.happ_menu(provider)
+    return seen[0]
+
+
+def test_happ_provider_menu_labels_show_availability(monkeypatch, tmp_path):
+    """Server labels carry the Happ GUI ✓/✗ availability marks."""
+
+    class IdleProvider:
+        name = "Happ"
+
+        def connect(self, conn):
+            return ActionResult(True, "ok")
+
+        def disconnect(self, conn):
+            return ActionResult(True, "ok")
+
+    import json
+    import time
+
+    now = time.time()
+    ping_file = tmp_path / "ping.json"
+    monkeypatch.setattr(vpn_manager.happmeta, "PING_CACHE", ping_file)
+    ping_file.write_text(
+        json.dumps(
+            {
+                "up": {"ms": 12.0, "at": now},
+                "down": {"ms": None, "at": now},
+                "unknown": {"ms": 7.0, "at": now - 999},  # stale -> unmarked
+            }
+        )
+    )
+    monkeypatch.setattr(vpn_manager.happmeta, "server_params", lambda name: None)
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+
+    entries = [
+        {"name": "up", "active": False},
+        {"name": "down", "active": False},
+        {"name": "unknown", "active": False},
+    ]
+    vpn_manager.happ_provider_menu(IdleProvider(), "P", entries)
+    assert "✓ 12 ms" in seen[0][0]
+    assert "✗" in seen[0][1]
+    assert seen[0][2] == "Connect unknown"  # stale -> no mark at all
+
+
+def test_happ_menu_provider_labels_include_ping_summary(monkeypatch, tmp_path):
+    import json
+    import time
+
+    now = time.time()
+    pings = json.dumps(
+        {
+            "s1": {"ms": 10.0, "at": now},
+            "s2": {"ms": 30.0, "at": now},
+            "s3": {"ms": 5.0, "at": now - 999},  # stale: P2 has no fresh data
+        }
+    )
+    options = _happ_menu_setup(monkeypatch, tmp_path, pings)
+    assert "P1  (1/2 · ✓ 2/2 · ⌀20ms)" in options
+    assert "P2" in options  # no fresh pings -> old plain label
+    assert not any(o.startswith("P2  (") for o in options)
+    assert options[-1] == "‹ Back"
+
+
+def test_happ_menu_provider_label_without_ping_data(monkeypatch, tmp_path):
+    options = _happ_menu_setup(monkeypatch, tmp_path, None)  # no cache file at all
+    assert "P1  (1/2)" in options  # old format: active suffix only
+    assert "P2" in options
+
+
 def test_two_level_connect(monkeypatch):
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
     patch_menu_env(monkeypatch, [wg], picks=["WireGuard", "Connect nl"])
@@ -201,3 +298,77 @@ def test_unique_labels_suffix_cannot_collide_with_genuine_label():
     # actions stay attached to their original entry
     unique = vpn_manager._unique_labels(items)
     assert [a() for _, a in unique] == [1, 2, 3]
+
+
+def _happ_provider_menu_env(monkeypatch, entries, info, seen, notifications, picks):
+    class P:
+        name = "Happ"
+
+        def connections(self):
+            return []
+
+        def connect(self, conn):
+            return ActionResult(True, "ok")
+
+        def disconnect(self, conn):
+            return ActionResult(True, "ok")
+
+    monkeypatch.setattr(vpn_manager.happmeta, "server_info_suffix", lambda name: "")
+    monkeypatch.setattr(vpn_manager.happmeta, "subscription_info", lambda sub_id: info)
+    monkeypatch.setattr(
+        vpn_manager, "notify", lambda *a, **k: notifications.append((a, k))
+    )
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    picks_iter = iter(picks)
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or next(picks_iter, None)),
+    )
+    return P()
+
+
+def test_happ_provider_menu_shows_traffic_info(monkeypatch):
+    """Panel info present -> leading ⓘ entry with traffic + expiry; its action
+    only notifies (never connectable)."""
+    entries = [{"name": "s1", "active": False, "provider_id": "42"}]
+    info = {
+        "upload": 0,
+        "download": 1973660012446,
+        "total": 0,
+        "expire": 1797232846,
+        "title": "oplVPN_bot",
+    }
+    seen, notifications = [], []
+    provider = _happ_provider_menu_env(monkeypatch, entries, info, seen, notifications, picks=[None])
+
+    vpn_manager.happ_provider_menu(provider, "P", entries)
+    assert seen[0] == ["ⓘ Трафик 1838 GB / ∞ · до 14.12.2026", "Connect s1", "‹ Back"]
+
+    # picking the ⓘ entry notifies with the full card, connects nothing
+    seen2, notifications2 = [], []
+    provider2 = _happ_provider_menu_env(
+        monkeypatch, entries, info, seen2, notifications2, picks=["ⓘ Трафик 1838 GB / ∞ · до 14.12.2026"]
+    )
+    vpn_manager.happ_provider_menu(provider2, "P", entries)
+    assert notifications2 == [(("Happ · P", "oplVPN_bot\n↓ 1838 GB · ↑ 0 GB / ∞\nДействует до 14.12.2026"), {})]
+
+
+def test_happ_provider_menu_omits_missing_info_parts(monkeypatch):
+    """expire None -> no 'до …' part; nothing raises on partial info."""
+    entries = [{"name": "s1", "active": False, "provider_id": "42"}]
+    info = {"upload": None, "download": None, "total": 0, "expire": None, "title": None}
+    seen, notifications = [], []
+    provider = _happ_provider_menu_env(monkeypatch, entries, info, seen, notifications, picks=[None])
+    vpn_manager.happ_provider_menu(provider, "P", entries)
+    assert seen[0] == ["Connect s1", "‹ Back"]  # nothing worth showing -> no ⓘ
+
+
+def test_happ_provider_menu_no_info_entry_without_record(monkeypatch):
+    """Older caches / captured extras (no provider_id, no info record) keep the
+    plain server list."""
+    entries = [{"name": "s1", "active": False, "provider_id": ""}]
+    seen, notifications = [], []
+    provider = _happ_provider_menu_env(monkeypatch, entries, None, seen, notifications, picks=[None])
+    vpn_manager.happ_provider_menu(provider, "P", entries)
+    assert seen[0] == ["Connect s1", "‹ Back"]

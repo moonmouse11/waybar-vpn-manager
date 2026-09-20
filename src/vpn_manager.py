@@ -228,12 +228,15 @@ def provider_menu(provider) -> ActionResult:
     if provider.name == "Happ":
         return happ_menu(provider)
 
+    happmeta.request_ping_update()
     items: list[tuple[str, callable]] = []
     for conn in provider.connections():
+        mark = happmeta.ping_mark(conn.name)
+        suffix = f"    {mark}" if mark else ""
         if conn.active:
-            items.append((f"Disconnect {conn.name}", lambda c=conn: provider.disconnect(c)))
+            items.append((f"Disconnect {conn.name}{suffix}", lambda c=conn: provider.disconnect(c)))
         else:
-            items.append((f"Connect {conn.name}", lambda c=conn: guarded_connect(provider, c)))
+            items.append((f"Connect {conn.name}{suffix}", lambda c=conn: guarded_connect(provider, c)))
     items.extend(provider_actions(provider))
     items.append(("‹ Back", back_to_main))
     run_items(_unique_labels(items), prompt=provider.name)
@@ -262,15 +265,21 @@ def happ_menu(provider) -> ActionResult:
     for server in servers:
         is_active = server["name"] in matched
         groups.setdefault(server["provider_name"], []).append(
-            {"name": server["name"], "active": is_active}
+            {"name": server["name"], "active": is_active, "provider_id": server["provider_id"]}
         )
 
     items: list[tuple[str, callable]] = []
     for pname, group in groups.items():
         active = sum(1 for g in group if g["active"])
-        label = pname
+        summary = happmeta.provider_ping_summary([g["name"] for g in group])
+        suffixes = []
         if active:
-            label += f"  ({active}/{len(group)})"
+            suffixes.append(f"{active}/{len(group)}")
+        if summary:
+            suffixes.append(summary)
+        label = pname
+        if suffixes:
+            label += "  (" + " · ".join(suffixes) + ")"
         items.append((label, lambda p=pname, g=group: happ_provider_menu(provider, p, g)))
     items.append(("‹ Back", back_to_main))
     run_items(items, prompt="Happ")
@@ -283,6 +292,38 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
         notify("Happ", f"{pname}: нет серверов")
         return ActionResult(True, "")
     items: list[tuple[str, callable]] = []
+
+    # Panel card info (traffic/expiry) from the subscription cache — the
+    # first "ⓘ" entry only notifies, it is not connectable.
+    sub_id = next((e.get("provider_id") for e in entries if e.get("provider_id")), None)
+    info = happmeta.subscription_info(sub_id) if sub_id else None
+    if info:
+        parts = []
+        traffic = happmeta.fmt_traffic(info.get("download"))
+        limit = happmeta.fmt_limit(info.get("total"))
+        if traffic != "?" or limit != "∞":
+            parts.append(f"Трафик {traffic} / {limit}")
+        expire = happmeta.fmt_expire(info.get("expire"))
+        if expire != "?":
+            parts.append(f"до {expire}")
+        if parts:
+            lines = []
+            if info.get("title"):
+                lines.append(str(info["title"]))
+            lines.append(
+                f"↓ {happmeta.fmt_traffic(info.get('download'))} · "
+                f"↑ {happmeta.fmt_traffic(info.get('upload'))} / "
+                f"{happmeta.fmt_limit(info.get('total'))}"
+            )
+            if expire != "?":
+                lines.append(f"Действует до {expire}")
+
+            def _info_action():
+                notify(f"Happ · {pname}", "\n".join(lines))
+                return ActionResult(True, "")
+
+            items.append(("ⓘ " + " · ".join(parts), _info_action))
+
     for entry in entries:
         conn = VPNConnection(name=entry["name"], provider="Happ", active=entry["active"])
         icon = "Disconnect" if conn.active else "Connect"
@@ -391,6 +432,20 @@ def run_menu():
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+def _collect_ping_targets() -> list[tuple[str, str, int]]:
+    """Happ + every provider's ping targets for one --update-ping sweep.
+
+    One broken provider must not stop the others (pattern:
+    happmeta.update_subscriptions), so a raising ping_targets() is skipped."""
+    targets = happmeta.ping_targets()
+    for provider in ALL_PROVIDERS:
+        try:
+            targets += provider.ping_targets()
+        except Exception:
+            continue
+    return targets
+
+
 def notify(title: str, message: str, urgent: bool = False):
     cmd = ["notify-send"]
     if urgent:
@@ -442,7 +497,7 @@ def main():
     elif args.update_ip:
         ipinfo.update(args.update_ip)
     elif args.update_ping:
-        happmeta.update_pings()
+        happmeta.write_pings(_collect_ping_targets())
     elif args.update_subs:
         happmeta.update_subscriptions()
     elif args.happ_keeper is not None:

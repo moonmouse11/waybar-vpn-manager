@@ -11,16 +11,19 @@ Ping is TCP connect RTT to the server's host:port, measured by a background
 on the network.
 """
 
+import base64
 import copy
 import hashlib
 import json
 import os
 import re
 import socket
+import statistics
 import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 LOG_FILE = Path.home() / ".local/share/Happ/logs/subscription_log.txt"
@@ -251,15 +254,20 @@ def fetch_subscription(sub_id: str, url: str) -> list[dict]:
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode())
+                info = _parse_sub_info(resp)  # headers only readable while open
             if isinstance(data, list) and data and isinstance(data[0], dict):
                 servers = [s for s in data if s.get("outbounds")]
+                record = {"at": time.time(), "url": url, "servers": servers}
+                if info is not None:
+                    record["info"] = info
+                elif isinstance(cached, dict) and cached.get("url") == url:
+                    # panel answered without headers — keep the previous info
+                    if isinstance(cached.get("info"), dict):
+                        record["info"] = cached["info"]
                 try:
                     SUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                     cache_path.write_text(
-                        json.dumps(
-                            {"at": time.time(), "url": url, "servers": servers},
-                            ensure_ascii=False,
-                        )
+                        json.dumps(record, ensure_ascii=False)
                     )
                     os.chmod(cache_path, 0o600)  # configs carry UUIDs and reality keys
                 except OSError:
@@ -269,6 +277,80 @@ def fetch_subscription(sub_id: str, url: str) -> list[dict]:
             pass
 
     return cached.get("servers", []) if isinstance(cached, dict) else []
+
+
+def _parse_sub_info(resp) -> dict | None:
+    """Panel card info from response headers: traffic, expiry, display title.
+
+    'Subscription-Userinfo: upload=0; download=…; total=0; expire=…'
+    (total=0 means unlimited; expire is a unix epoch) and 'Profile-Title'
+    (some panels base64-encode it with a 'base64:' prefix). Returns None when
+    no field parsed; individual fields stay None when missing or malformed.
+    """
+    info: dict = {"upload": None, "download": None, "total": None, "expire": None, "title": None}
+    headers = getattr(resp, "headers", None)
+    if headers is None:
+        return None
+    raw = headers.get("Subscription-Userinfo")
+    if raw:
+        for part in raw.split(";"):
+            key, _, val = part.strip().partition("=")
+            if key in ("upload", "download", "total", "expire"):
+                try:
+                    info[key] = int(val)
+                except ValueError:
+                    pass  # tolerate malformed values, keep None
+    title = headers.get("Profile-Title")
+    if title:
+        title = title.strip()
+        if title.startswith("base64:"):
+            try:
+                title = base64.b64decode(title[len("base64:"):]).decode("utf-8", errors="replace")
+            except (ValueError, TypeError):
+                title = None
+        info["title"] = title or None
+    return info if any(v is not None for v in info.values()) else None
+
+
+def subscription_info(sub_id: str) -> dict | None:
+    """Cache-only panel info (traffic/expiry/title) for a provider's
+    subscription; None when absent (older caches lack the "info" record)."""
+    try:
+        cached = json.loads(_sub_cache_path(sub_id).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(cached, dict):
+        return None
+    info = cached.get("info")
+    return info if isinstance(info, dict) else None
+
+
+def fmt_traffic(bytes_: int | None) -> str:
+    """1973660012446 -> '1838 GB' (Happ's GB is 2^30 bytes); None -> '?'."""
+    if not isinstance(bytes_, (int, float)) or isinstance(bytes_, bool) or bytes_ < 0:
+        return "?"
+    gb = bytes_ / 2**30
+    if gb >= 100:
+        return f"{gb:.0f} GB"
+    small = f"{gb:.1f}"
+    return f"{small[:-2]} GB" if small.endswith(".0") else f"{small} GB"
+
+
+def fmt_limit(total: int | None) -> str:
+    """Traffic limit: 0 or None means unlimited."""
+    if not isinstance(total, (int, float)) or isinstance(total, bool) or total == 0:
+        return "∞"
+    return fmt_traffic(total)
+
+
+def fmt_expire(epoch: int | None) -> str:
+    """1797232846 -> '14.12.2026'; None -> '?'."""
+    if not isinstance(epoch, (int, float)) or isinstance(epoch, bool):
+        return "?"
+    try:
+        return datetime.fromtimestamp(epoch).strftime("%d.%m.%Y")
+    except (OverflowError, OSError, ValueError):
+        return "?"
 
 
 def fetch_subscription_cached(sub_id: str) -> list[dict]:
@@ -505,6 +587,27 @@ def ping_ms(name: str) -> float | None:
     return entry.get("ms")
 
 
+def provider_ping_summary(names: list[str]) -> str | None:
+    """'✓ reachable/total · ⌀median ms' for a provider's servers — cache only.
+
+    The ✓ mirrors the Happ GUI availability metaphor. reachable counts
+    servers with a fresh ping (same freshness rule as ping_ms); the median
+    runs over those pings. None when no server has fresh data (e.g. the
+    first minutes after install)."""
+    pings = _read_pings()
+    now = time.time()
+    fresh_ms = []
+    for name in names:
+        entry = pings.get(name)
+        if not isinstance(entry, dict) or now - entry.get("at", 0) > PING_MAX_AGE:
+            continue
+        if entry.get("ms") is not None:
+            fresh_ms.append(entry["ms"])
+    if not fresh_ms:
+        return None
+    return f"✓ {len(fresh_ms)}/{len(names)} · ⌀{round(statistics.median(fresh_ms))}ms"
+
+
 def request_ping_update() -> None:
     """Fire-and-forget background ping refresh if the cache is stale."""
     pings = _read_pings()
@@ -533,14 +636,31 @@ def measure_ping(host: str, port: int) -> float | None:
 
 
 def update_pings() -> None:
-    """Background entry point: refresh the ping cache for all known servers."""
-    pings: dict[str, dict] = {}
+    """Background entry point: refresh the ping cache for Happ servers.
+    vpn_manager's --update-ping combines these with the other providers'
+    ping_targets() into a single write_pings() call (one cache writer)."""
+    write_pings(ping_targets())
+
+
+def ping_targets() -> list[tuple[str, str, int]]:
+    """(name, host, port) for every known Happ server."""
+    targets = []
     for server in all_servers():
         params = server_params(server["name"])
-        if not params:
-            continue
-        ms = measure_ping(params["host"], params["port"])
-        pings[server["name"]] = {"ms": ms, "at": time.time()}
+        if params:
+            targets.append((server["name"], params["host"], params["port"]))
+    return targets
+
+
+def write_pings(targets: list[tuple[str, str, int]]) -> None:
+    """Measure and write the ping cache (single writer, fixed format)."""
+    pings: dict[str, dict] = {}
+    for name, host, port in targets:
+        try:
+            ms = measure_ping(host, port)
+        except (OSError, OverflowError, ValueError, TypeError):
+            ms = None  # one bad target must not abort the whole sweep
+        pings[name] = {"ms": ms, "at": time.time()}
     pings["updated_at"] = time.time()
     try:
         PING_CACHE.parent.mkdir(parents=True, exist_ok=True)
@@ -549,13 +669,34 @@ def update_pings() -> None:
         pass
 
 
+def _fresh_ping_entry(name: str) -> dict | None:
+    """Fresh ping-cache entry for a server, or None when stale/absent."""
+    entry = _read_pings().get(name)
+    if not isinstance(entry, dict) or time.time() - entry.get("at", 0) > PING_MAX_AGE:
+        return None
+    return entry
+
+
+def ping_mark(name: str) -> str:
+    """'✓ 42 ms' / '✗' / '' — the Happ GUI availability metaphor for any
+    connection name in the shared ping cache (Happ, WireGuard, OpenVPN)."""
+    entry = _fresh_ping_entry(name)
+    if entry is None:
+        return ""
+    if entry.get("ms") is None:
+        return "✗"
+    return f"✓ {entry['ms']:.0f} ms"
+
+
 def server_info_suffix(name: str) -> str:
-    """'42 ms · trojan/ws' for menu labels — compact, the standard
-    vless/tcp/reality tuple is omitted (it is the common case)."""
-    parts = []
-    ms = ping_ms(name)
-    if ms is not None:
-        parts.append(f"{ms:.0f} ms")
+    """'✓ 42 ms · trojan/ws' for menu labels — ping_mark plus xray protocol
+    info. The standard vless/tcp/reality tuple is omitted (it is the common
+    case); a server never measured stays unmarked so the label does not get
+    noisy."""
+    mark = ping_mark(name)
+    if not mark or mark == "✗":
+        return mark
+    parts = [mark]
     params = server_params(name)
     if params:
         proto = (params["protocol"], params["network"], params["security"])

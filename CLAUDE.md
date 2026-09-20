@@ -47,4 +47,4 @@ The project is a Python backend (`src/`) invoked by two thin bash wrappers (`way
 
 ## System dependencies
 
-`sudo` access (passwordless via sudoers) is required for `wg-quick`, `openvpn`, `kill`, `mkdir`, `rm`, `cp`, `chmod`. The installer creates `/etc/sudoers.d/vpn-manager` for this.
+`sudo` access (passwordless via sudoers) is required for `wg-quick`, `openvpn`, `kill`, `mkdir`, `rm`, `cp`, `chmod`, `cat` (on the WireGuard/OpenVPN config globs — the background ping sweep reads endpoints from menu-imported root:0600 configs). The installer creates `/etc/sudoers.d/vpn-manager` for this.

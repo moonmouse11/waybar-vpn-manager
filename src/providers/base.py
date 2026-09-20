@@ -1,6 +1,34 @@
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def read_config_text(path) -> str | None:
+    """Text of a provider config: direct read first, else 'sudo -n cat'.
+
+    Configs imported through the menu are copied root:0600, so the
+    unprivileged background ping sweep cannot read them directly — the
+    sudoers rule grants NOPASSWD cat for the config globs. None when both
+    attempts fail (missing file, no cached sudo credentials)."""
+    p = Path(path)
+    try:
+        return p.read_text(errors="replace")
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "cat", str(p)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
 
 
 @dataclass
@@ -73,6 +101,12 @@ class VPNProvider(ABC):
     def import_config(self, path: str) -> ActionResult:
         """Import a config file and register it as a new connection"""
         ...
+
+    def ping_targets(self) -> list[tuple[str, str, int]]:
+        """(connection name, host, port) for availability/ping measurement.
+        Providers with a measurable endpoint (WireGuard, OpenVPN) override
+        this; the shared ping cache and ✓/✗ labels are name-keyed."""
+        return []
 
     def toggle_autostart(self, connection: VPNConnection) -> ActionResult:
         return ActionResult(False, f"{self.name}: autostart not supported")

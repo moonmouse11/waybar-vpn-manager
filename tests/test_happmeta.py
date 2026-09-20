@@ -1,3 +1,4 @@
+import email.message
 import hashlib
 import json
 import time
@@ -174,9 +175,13 @@ def test_server_params_trojan_fallback(tmp_path, monkeypatch):
     assert params["port"] == 443
     assert params["protocol"] == "trojan"
     assert params["network"] == "ws"
-    assert "/".join((params["protocol"], params["network"], params["security"])) in (
-        happmeta.server_info_suffix("tr")
-    )
+    # the protocol part renders next to the ✓ availability mark
+    ping_file = tmp_path / "ping.json"
+    monkeypatch.setattr(happmeta, "PING_CACHE", ping_file)
+    ping_file.write_text(json.dumps({"tr": {"ms": 42.0, "at": time.time()}}))
+    suffix = happmeta.server_info_suffix("tr")
+    assert suffix.startswith("✓ ")
+    assert "/".join((params["protocol"], params["network"], params["security"])) in suffix
 
 
 def test_build_runtime_config_merges_like_gui():
@@ -384,9 +389,31 @@ def test_server_params_and_ping_cache(tmp_path, monkeypatch):
     ping_file.write_text(json.dumps({"ee": {"ms": 42.0, "at": time.time()}}))
     assert happmeta.ping_ms("ee") == 42.0
     assert "42 ms" in happmeta.server_info_suffix("ee")
+    assert happmeta.server_info_suffix("ee").startswith("✓ ")
     # standard vless/tcp/reality tuple is omitted; host is not shown (too long)
     assert "vless" not in happmeta.server_info_suffix("ee")
     assert "example.com" not in happmeta.server_info_suffix("ee")
+
+
+def test_server_info_suffix_availability(tmp_path, monkeypatch):
+    """Happ GUI metaphor: ✓ reachable, ✗ fresh failure, unmarked when unknown."""
+    ping_file = tmp_path / "ping.json"
+    monkeypatch.setattr(happmeta, "PING_CACHE", ping_file)
+    now = time.time()
+    ping_file.write_text(
+        json.dumps(
+            {
+                "up": {"ms": 42.0, "at": now},
+                "down": {"ms": None, "at": now},  # measured but unreachable
+                "stale": {"ms": 1.0, "at": now - 999},
+            }
+        )
+    )
+    monkeypatch.setattr(happmeta, "server_params", lambda name: None)
+    assert happmeta.server_info_suffix("up") == "✓ 42 ms"
+    assert happmeta.server_info_suffix("down") == "✗"
+    assert happmeta.server_info_suffix("stale") == ""
+    assert happmeta.server_info_suffix("absent") == ""
 
 
 def test_ping_cache_expiry(tmp_path, monkeypatch):
@@ -394,6 +421,32 @@ def test_ping_cache_expiry(tmp_path, monkeypatch):
     monkeypatch.setattr(happmeta, "PING_CACHE", ping_file)
     ping_file.write_text(json.dumps({"x": {"ms": 42.0, "at": time.time() - 999}}))
     assert happmeta.ping_ms("x") is None
+
+
+def test_provider_ping_summary(tmp_path, monkeypatch):
+    ping_file = tmp_path / "ping.json"
+    monkeypatch.setattr(happmeta, "PING_CACHE", ping_file)
+    now = time.time()
+    ping_file.write_text(
+        json.dumps(
+            {
+                "fresh10": {"ms": 10.0, "at": now},
+                "fresh20": {"ms": 20.0, "at": now},
+                "fresh30": {"ms": 30.0, "at": now},
+                "stale": {"ms": 5.0, "at": now - 999},
+                "null_ms": {"ms": None, "at": now},  # measured but unreachable
+            }
+        )
+    )
+    # median over the three fresh pings; stale/absent/null entries don't count
+    assert happmeta.provider_ping_summary(["fresh10", "fresh20", "fresh30"]) == "✓ 3/3 · ⌀20ms"
+    assert happmeta.provider_ping_summary(["fresh10", "fresh20", "stale", "absent"]) == (
+        "✓ 2/4 · ⌀15ms"
+    )
+    # a server answered with ms=None: reachable count excludes it
+    assert happmeta.provider_ping_summary(["null_ms"]) is None
+    # nothing fresh at all -> no suffix
+    assert happmeta.provider_ping_summary(["stale", "absent"]) is None
 
 
 def test_update_pings(tmp_path, monkeypatch):
@@ -468,6 +521,44 @@ def test_fetch_subscription_cache_url_revalidation(tmp_path, monkeypatch):
     assert [s["remarks"] for s in servers] == ["legacy"]
 
 
+def test_fetch_subscription_keeps_info_on_headerless_refresh(tmp_path, monkeypatch):
+    """A successful refresh whose panel omits the info headers must not
+    delete the previously cached info."""
+    monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)
+    headers_file = tmp_path / "headers.json"
+    headers_file.write_text(json.dumps({"User-Agent": "Happ/1.0"}))
+    monkeypatch.setattr(happmeta, "HEADERS_FILE", headers_file)
+
+    info = {"download": 1973660012446, "total": 0, "expire": 1797232846, "title": "t"}
+    (tmp_path / "subscription-1.json").write_text(
+        json.dumps(
+            {
+                "at": time.time() - 9999,  # stale, forces refetch
+                "url": "https://x/sub",
+                "servers": [{"remarks": "old"}],
+                "info": info,
+            }
+        )
+    )
+
+    class FakeResp:
+        def read(self):
+            return json.dumps([{"remarks": "new", "outbounds": [{}]}]).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        happmeta.urllib.request, "urlopen", lambda req, timeout: FakeResp()
+    )
+    happmeta.fetch_subscription("1", "https://x/sub")
+    kept = happmeta.subscription_info("1")
+    assert kept == info
+
+
 def test_fetch_subscription_non_dict_cache_returns_empty(tmp_path, monkeypatch):
     """A truthy non-dict JSON cache (e.g. "1") must not crash the menu path
     with AttributeError when the fetch fails and the stale-cache tail runs."""
@@ -483,3 +574,99 @@ def test_fetch_subscription_non_dict_cache_returns_empty(tmp_path, monkeypatch):
         lambda req, timeout: (_ for _ in ()).throw(OSError("network down")),
     )
     assert happmeta.fetch_subscription("1", "https://x/1") == []
+
+
+# ── Panel card info (traffic / expiry / title from response headers) ──────────
+
+
+class _InfoResp:
+    """Fake urlopen response with real-ish headers."""
+
+    def __init__(self, headers: email.message.Message):
+        self.headers = headers
+
+    def read(self):
+        return json.dumps([{"remarks": "S", "outbounds": [{}]}]).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _patch_fetch_env(tmp_path, monkeypatch, headers):
+    monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)
+    headers_file = tmp_path / "headers.json"
+    headers_file.write_text('{"User-Agent": "Happ/1.0"}')
+    monkeypatch.setattr(happmeta, "HEADERS_FILE", headers_file)
+    monkeypatch.setattr(
+        happmeta.urllib.request, "urlopen", lambda req, timeout: _InfoResp(headers)
+    )
+
+
+def test_fetch_subscription_stores_parsed_info(tmp_path, monkeypatch):
+    """Both panel headers are captured: userinfo key=value parsed, base64
+    profile-title decoded; subscription_info reads them back from cache."""
+    headers = email.message.Message()
+    headers["Subscription-Userinfo"] = (
+        "upload=0; download=1973660012446; total=0; expire=1797232846"
+    )
+    headers["Profile-Title"] = "base64:b3BsVlBOX2JvdA=="
+    _patch_fetch_env(tmp_path, monkeypatch, headers)
+
+    servers = happmeta.fetch_subscription("7", "https://x/1")
+    assert [s["remarks"] for s in servers] == ["S"]
+    assert happmeta.subscription_info("7") == {
+        "upload": 0,
+        "download": 1973660012446,
+        "total": 0,
+        "expire": 1797232846,
+        "title": "oplVPN_bot",
+    }
+
+
+def test_fetch_subscription_tolerates_malformed_info(tmp_path, monkeypatch):
+    """Garbage values drop to None, valid siblings survive, nothing raises."""
+    headers = email.message.Message()
+    headers["Subscription-Userinfo"] = "upload=abc; download=5; expire;"
+    _patch_fetch_env(tmp_path, monkeypatch, headers)
+
+    happmeta.fetch_subscription("7", "https://x/1")
+    info = happmeta.subscription_info("7")
+    assert info["upload"] is None
+    assert info["download"] == 5
+    assert info["expire"] is None
+    assert info["title"] is None
+
+
+def test_fetch_subscription_without_info_headers(tmp_path, monkeypatch):
+    """No panel headers -> no 'info' record; subscription_info -> None."""
+    _patch_fetch_env(tmp_path, monkeypatch, email.message.Message())
+    happmeta.fetch_subscription("7", "https://x/1")
+    record = json.loads((tmp_path / "subscription-7.json").read_text())
+    assert "info" not in record
+    assert happmeta.subscription_info("7") is None
+
+
+def test_subscription_info_absent_and_malformed(tmp_path, monkeypatch):
+    monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)
+    assert happmeta.subscription_info("nope") is None  # no cache file at all
+    (tmp_path / "subscription-1.json").write_text(
+        json.dumps({"at": 1, "servers": [], "info": "not-a-dict"})
+    )
+    assert happmeta.subscription_info("1") is None
+
+
+def test_fmt_traffic_limit_expire():
+    assert happmeta.fmt_traffic(1973660012446) == "1838 GB"
+    assert happmeta.fmt_traffic(None) == "?"
+    assert happmeta.fmt_traffic("garbage") == "?"
+    assert happmeta.fmt_traffic(-5) == "?"  # garbage counter from a panel
+    assert happmeta.fmt_traffic(2**30 // 2) == "0.5 GB"
+    assert happmeta.fmt_limit(0) == "∞"  # 0 means unlimited
+    assert happmeta.fmt_limit(None) == "∞"
+    assert happmeta.fmt_limit(2**40) == "1024 GB"
+    assert happmeta.fmt_expire(1797232846) == "14.12.2026"
+    assert happmeta.fmt_expire(None) == "?"
+    assert happmeta.fmt_expire(10**30) == "?"  # out of range must not raise

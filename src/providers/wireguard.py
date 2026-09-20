@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from .base import ActionResult, VPNConnection, VPNProvider
+from .base import ActionResult, VPNConnection, VPNProvider, read_config_text
 
 WG_DIR = Path("/etc/wireguard")
 
@@ -22,6 +22,55 @@ def _active_interfaces() -> list[str]:
         if len(parts) >= 2:
             interfaces.append(parts[1].strip())
     return interfaces
+
+
+def _split_host_port(value: str, default_port: int) -> tuple[str, int] | None:
+    """'host:port' / '[v6]:port' / bare v6 or hostname (default port).
+
+    A port must be all-digits and <= 65535 — socket.create_connection
+    raises OverflowError beyond that, which would abort a whole ping
+    sweep. Tolerant of junk after ']' ('[v6]51820' -> host, default port)."""
+    v = value.strip()
+    if not v:
+        return None
+    if v.startswith("["):
+        end = v.find("]")
+        if end == -1:
+            return None
+        host = v[1:end]
+        rest = v[end + 1 :]
+        if rest.startswith(":") and rest[1:].isdigit():
+            port = int(rest[1:])
+            return (host, port) if host and port <= 65535 else None
+        return (host, default_port) if host else None
+    if v.count(":") > 1:  # bare IPv6, no port
+        return v, default_port
+    if ":" in v:
+        host, _, port = v.rpartition(":")
+        if not host or not port.isdigit():
+            return None
+        port = int(port)
+        return (host, port) if port <= 65535 else None
+    return v, default_port
+
+
+def wg_endpoint(conf_path) -> tuple[str, int] | None:
+    """(host, port) of a config's [Peer] Endpoint, None when absent/garbled."""
+    text = read_config_text(conf_path)
+    if text is None:
+        return None
+    in_peer = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_peer = s[1:-1].strip().lower() == "peer"
+            continue
+        if not in_peer or "=" not in s:
+            continue
+        key, _, val = s.partition("=")
+        if key.strip().lower() == "endpoint":
+            return _split_host_port(val, 51820)
+    return None
 
 
 class WireGuardProvider(VPNProvider):
@@ -63,6 +112,16 @@ class WireGuardProvider(VPNProvider):
                 )
 
         return result
+
+    def ping_targets(self) -> list[tuple[str, str, int]]:
+        targets = []
+        for conn in self.connections():
+            if not conn.config_path:
+                continue
+            ep = wg_endpoint(conn.config_path)
+            if ep:
+                targets.append((conn.name, ep[0], ep[1]))
+        return targets
 
     def connect(self, connection: VPNConnection) -> ActionResult:
         code, out = _run(["sudo", "wg-quick", "up", connection.name])
