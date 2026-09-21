@@ -51,6 +51,11 @@ XRAY_BIN = Path("/opt/happ/bin/core/xray")
 ROUTING_DIR = Path.home() / ".local/share/Happ/routing"
 
 SOCKET_TIMEOUT = 1.5
+XRAY_TIMEOUT = 20  # seconds to wait for happd's start ack
+# --status polls happd several times per tick (one per happd-backed provider);
+# a short file cache cuts that churn — happd logs show constant connect noise.
+PROCS_CACHE = Path.home() / ".cache/vpn-manager/happd-procs.json"
+PROCS_CACHE_TTL = 3.0  # seconds
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
@@ -110,25 +115,51 @@ def _daemon_request(action: str, **params) -> dict | None:
         sock.close()
 
 
-def _daemon_running_processes() -> list[str]:
+def _daemon_running_processes(fresh: bool = False) -> list[str]:
+    """happd's running managed process ids, with a short cross-process file
+    cache (each --status tick is a fresh python process and would otherwise
+    open a happd session per happd-backed provider). Pass fresh=True on
+    action paths (connect/disconnect) to bypass the cache entirely."""
+    if not fresh:
+        try:
+            cached = json.loads(PROCS_CACHE.read_text())
+            if (
+                isinstance(cached, dict)
+                and isinstance(cached.get("at"), (int, float))
+                and isinstance(cached.get("procs"), list)
+                and time.time() - cached.get("at", 0) < PROCS_CACHE_TTL
+            ):
+                return [str(p) for p in cached["procs"]]
+        except (OSError, json.JSONDecodeError):
+            pass
     resp = _daemon_request("list")
     if not resp or resp.get("status") != "success":
         return []
-    return [
+    procs = [
         p["process-id"]
         for p in resp.get("processes", [])
         if p.get("running") and p.get("process-id")
     ]
+    if not fresh:
+        try:
+            PROCS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = PROCS_CACHE.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"at": time.time(), "procs": procs}))
+            os.chmod(tmp, 0o600)
+            tmp.replace(PROCS_CACHE)
+        except OSError:
+            pass
+    return procs
 
 
 KEYS_PROCESS_PREFIX = "xray-keys-"
 
 
-def _happ_processes() -> list[str]:
+def _happ_processes(fresh: bool = False) -> list[str]:
     """Happ's own managed processes. The keys providers run their xray
     through the same happd — those must not count as 'Happ connected'
     (phantom server in the menu) nor get stopped by a Happ disconnect."""
-    return [p for p in _daemon_running_processes() if not p.startswith(KEYS_PROCESS_PREFIX)]
+    return [p for p in _daemon_running_processes(fresh=fresh) if not p.startswith(KEYS_PROCESS_PREFIX)]
 
 
 def _happ_interfaces() -> list[str]:
@@ -230,6 +261,10 @@ def _send_frame(sock: socket.socket, frame: dict) -> None:
     sock.sendall(struct.pack(">I", len(payload)) + payload)
 
 
+def _iface_exists(name: str) -> bool:
+    return Path(f"/sys/class/net/{name}").exists()
+
+
 def _recv_frame(sock: socket.socket) -> dict | None:
     """One framed JSON message; None on malformed payload. Raises OSError/
     socket.timeout on connection problems."""
@@ -268,7 +303,6 @@ def run_keeper(server_name: str | None = None) -> None:
     # not win the file in the gap between unlink and this first write —
     # otherwise every later state of ours gets dropped (guarded by pid).
     _write_keeper_state(state)
-    sock: socket.socket | None = None
     try:
         cfg = happmeta.resolve_config(server_name or (_last_server_name() or ""))
         if cfg is None:
@@ -277,49 +311,86 @@ def run_keeper(server_name: str | None = None) -> None:
             return
 
         iface = _tun_interface_name(cfg)
-        sock = _open_session()
-        request_id = f"wm-{time.time_ns()}"
-        params: dict = {
-            "action": "start",
-            "arguments": [],
-            "executable": str(XRAY_BIN),
-            "process-id": "xray-core",
-            "request-id": request_id,
-            "stdin-data": json.dumps(cfg),
-        }
-        asset_dir = _routing_asset_dir()
-        if asset_dir:
-            params["environment"] = {"XRAY_LOCATION_ASSET": str(asset_dir)}
-        _send_frame(sock, params)
 
-        deadline = time.time() + 8
-        while time.time() < deadline:
-            frame = _recv_frame(sock)
-            if frame and frame.get("request-id") == request_id:
-                if frame.get("status") in ("started", "success"):
-                    break
-                state.update(status="error", message=frame.get("error", str(frame)))
-                _write_own_keeper_state(state)
-                return
-        else:
-            state.update(status="error", message="no response from happd")
-            _write_own_keeper_state(state)
-            return
-
-        state.update(status="connected", server=cfg.get("remarks"))
-        _write_own_keeper_state(state)
-        logutil.log(f"keeper: connected ({state['server']})")
-
-        # Hold the session open; exit when the tunnel disappears.
-        sock.settimeout(15)
+        # happd occasionally kills the managed xray without telling us (observed
+        # after ~1-9 min, no journal trace). Re-arm the start a few times on an
+        # unexpected tunnel death — but never on "happd sent stopped": that is
+        # the user's own disconnect and must not be fought.
+        max_attempts = 3
+        backoff = 3.0
+        attempts = 0
+        exit_reason = "unknown"
         while True:
+            attempts += 1
+            sock = _open_session()
             try:
-                frame = _recv_frame(sock)
-            except TimeoutError:
-                if iface and not Path(f"/sys/class/net/{iface}").exists():
-                    break
-                continue
-            if frame and frame.get("event") == "stopped":
+                request_id = f"wm-{time.time_ns()}"
+                params: dict = {
+                    "action": "start",
+                    "arguments": [],
+                    "executable": str(XRAY_BIN),
+                    "process-id": "xray-core",
+                    "request-id": request_id,
+                    "stdin-data": json.dumps(cfg),
+                }
+                asset_dir = _routing_asset_dir()
+                if asset_dir:
+                    params["environment"] = {"XRAY_LOCATION_ASSET": str(asset_dir)}
+                _send_frame(sock, params)
+
+                deadline = time.time() + XRAY_TIMEOUT
+                while time.time() < deadline:
+                    try:
+                        frame = _recv_frame(sock)
+                    except TimeoutError:
+                        # slow happd: a socket timeout must consume the ack
+                        # budget, not kill the keeper
+                        continue
+                    if frame and frame.get("request-id") == request_id:
+                        if frame.get("status") in ("started", "success"):
+                            break
+                        state.update(status="error", message=frame.get("error", str(frame)))
+                        _write_own_keeper_state(state)
+                        return
+                else:
+                    state.update(status="error", message="no response from happd")
+                    _write_own_keeper_state(state)
+                    return
+
+                state.update(status="connected", server=cfg.get("remarks"))
+                _write_own_keeper_state(state)
+                logutil.log(
+                    f"keeper: connected ({state['server']})"
+                    + (f", re-arm {attempts}/{max_attempts}" if attempts > 1 else "")
+                )
+
+                # Hold the session open; exit when the tunnel disappears.
+                sock.settimeout(15)
+                exit_reason = "unknown"
+                while True:
+                    try:
+                        frame = _recv_frame(sock)
+                    except TimeoutError:
+                        if iface and not _iface_exists(iface):
+                            exit_reason = f"iface {iface} gone"
+                            break
+                        continue
+                    if frame and frame.get("event") == "stopped":
+                        exit_reason = "happd sent stopped"
+                        break
+            finally:
+                sock.close()
+            logutil.log(f"keeper: tunnel ended: {exit_reason}")
+            if exit_reason != f"iface {iface} gone" or attempts >= max_attempts:
+                break
+            logutil.log(f"keeper: xray died unexpectedly, re-arming in {backoff:.0f}s")
+            time.sleep(backoff)
+            backoff = min(backoff * 3, 30)
+            current = _read_keeper_state()
+            if current is None or current.get("pid") != os.getpid():
+                # a disconnect/new keeper removed or replaced the state file
+                # while we slept — this keeper no longer owns the session
+                logutil.log("keeper: ownership lost, aborting re-arm")
                 break
     except (OSError, ConnectionError) as e:
         logutil.log(f"keeper: session error: {e}")
@@ -331,8 +402,6 @@ def run_keeper(server_name: str | None = None) -> None:
         state.update(status="error", message=str(e))
         _write_own_keeper_state(state)
     finally:
-        if sock:
-            sock.close()
         state.update(status="exited")
         _write_own_keeper_state(state)
         logutil.log("keeper: exited")
@@ -447,7 +516,7 @@ class HappProvider(VPNProvider):
     def _stop_running(self) -> None:
         """Stop managed processes and wait for the tunnel to come down
         (used when switching servers)."""
-        processes = _happ_processes()
+        processes = _happ_processes(fresh=True)
         if not processes:
             return
         for process_id in processes:
@@ -461,8 +530,8 @@ class HappProvider(VPNProvider):
     def _headless_connect(self, server_name: str) -> ActionResult:
         """Spawn the keeper process and wait for its verdict.
 
-        The keeper allows ~8 s for happd's start ack before it reports an
-        error, so poll a while longer than that before giving up ourselves."""
+        The keeper allows 20 s for happd's start ack before it reports an
+        error, so poll a while longer (25 s) before giving up ourselves."""
         KEEPER_STATE.unlink(missing_ok=True)
         manager = Path(__file__).resolve().parent.parent / "vpn_manager.py"
         subprocess.Popen(
@@ -485,7 +554,11 @@ class HappProvider(VPNProvider):
         return ActionResult(False, "keeper timeout — see log")
 
     def disconnect(self, connection: VPNConnection) -> ActionResult:
-        processes = _happ_processes()
+        # Unlinking KEEPER_STATE (all branches) aborts a keeper that is
+        # sleeping between re-arm attempts — do it FIRST so even a failed
+        # stop cannot leave a sleeping keeper behind to resurrect.
+        KEEPER_STATE.unlink(missing_ok=True)
+        processes = _happ_processes(fresh=True)
         if not processes:
             return ActionResult(success=False, message="Happ is not connected")
 

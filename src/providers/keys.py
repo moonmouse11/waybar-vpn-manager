@@ -407,6 +407,10 @@ def _build_xray_config(server: dict) -> dict:
 # ── Keeper: long-lived happd session owning the xray process ─────────────────
 
 
+def _iface_exists(name: str) -> bool:
+    return Path(f"/sys/class/net/{name}").exists()
+
+
 def _write_keeper_state(state_path: Path, state: dict, own: bool = False) -> None:
     if own:
         current = _read_keeper_state(state_path)
@@ -437,7 +441,8 @@ def run_keeper(kind: str, server_id: str) -> None:
     logutil.log(f"keys keeper: starting ({kind} {server_id})")
     state: dict = {"status": "connecting", "pid": os.getpid(), "server": server_id}
     _write_keeper_state(state_path, state)  # unconditional first claim
-    sock: socket.socket | None = None
+    attempts = 0
+    exit_reason = "unknown"
     try:
         server = next((s for s in _load_servers() if _server_id(s) == server_id), None)
         if server is None:
@@ -445,48 +450,83 @@ def run_keeper(kind: str, server_id: str) -> None:
             _write_keeper_state(state_path, state)
             return
         cfg = _build_xray_config(server)
-        sock = _open_session()
-        request_id = f"wm-keys-{time.time_ns()}"
-        params: dict = {
-            "action": "start",
-            "arguments": [],
-            "executable": str(XRAY_BIN),
-            "process-id": process_id,
-            "request-id": request_id,
-            "stdin-data": json.dumps(cfg),
-        }
-        asset_dir = _routing_asset_dir()
-        if asset_dir:
-            params["environment"] = {"XRAY_LOCATION_ASSET": str(asset_dir)}
-        _send_frame(sock, params)
 
-        deadline = time.time() + XRAY_TIMEOUT
-        while time.time() < deadline:
-            frame = _recv_frame(sock)
-            if frame and frame.get("request-id") == request_id:
-                if frame.get("status") in ("started", "success"):
-                    break
-                state.update(status="error", message=frame.get("error", str(frame)))
-                _write_keeper_state(state_path, state, own=True)
-                return
-        else:
-            state.update(status="error", message="no response from happd")
-            _write_keeper_state(state_path, state, own=True)
-            return
-
-        state.update(status="connected", server=server["name"])
-        _write_keeper_state(state_path, state, own=True)
-        logutil.log(f"keys keeper: connected ({server['name']})")
-
-        sock.settimeout(15)
+        # happd occasionally kills the managed xray without telling us (observed
+        # after ~1-9 min, no journal trace). Re-arm the start a few times on an
+        # unexpected tunnel death — but never on "happd sent stopped": that is
+        # the user's own disconnect and must not be fought.
+        max_attempts = 3
+        backoff = 3.0
         while True:
+            attempts += 1
+            sock = _open_session()
             try:
-                frame = _recv_frame(sock)
-            except TimeoutError:
-                if not Path(f"/sys/class/net/{iface}").exists():
-                    break
-                continue
-            if frame and frame.get("event") == "stopped":
+                request_id = f"wm-keys-{time.time_ns()}"
+                params: dict = {
+                    "action": "start",
+                    "arguments": [],
+                    "executable": str(XRAY_BIN),
+                    "process-id": process_id,
+                    "request-id": request_id,
+                    "stdin-data": json.dumps(cfg),
+                }
+                asset_dir = _routing_asset_dir()
+                if asset_dir:
+                    params["environment"] = {"XRAY_LOCATION_ASSET": str(asset_dir)}
+                _send_frame(sock, params)
+
+                deadline = time.time() + XRAY_TIMEOUT
+                while time.time() < deadline:
+                    try:
+                        frame = _recv_frame(sock)
+                    except TimeoutError:
+                        # slow happd: a socket timeout must consume the ack
+                        # budget, not kill the keeper
+                        continue
+                    if frame and frame.get("request-id") == request_id:
+                        if frame.get("status") in ("started", "success"):
+                            break
+                        state.update(status="error", message=frame.get("error", str(frame)))
+                        _write_keeper_state(state_path, state, own=True)
+                        return
+                else:
+                    state.update(status="error", message="no response from happd")
+                    _write_keeper_state(state_path, state, own=True)
+                    return
+
+                state.update(status="connected", server=server["name"])
+                _write_keeper_state(state_path, state, own=True)
+                logutil.log(
+                    f"keys keeper: connected ({server['name']})"
+                    + (f", re-arm {attempts}/{max_attempts}" if attempts > 1 else "")
+                )
+
+                sock.settimeout(15)
+                exit_reason = "unknown"
+                while True:
+                    try:
+                        frame = _recv_frame(sock)
+                    except TimeoutError:
+                        if not _iface_exists(iface):
+                            exit_reason = f"iface {iface} gone"
+                            break
+                        continue
+                    if frame and frame.get("event") == "stopped":
+                        exit_reason = "happd sent stopped"
+                        break
+            finally:
+                sock.close()
+            logutil.log(f"keys keeper: tunnel ended: {exit_reason}")
+            if exit_reason != f"iface {iface} gone" or attempts >= max_attempts:
+                break
+            logutil.log(f"keys keeper: xray died unexpectedly, re-arming in {backoff:.0f}s")
+            time.sleep(backoff)
+            backoff = min(backoff * 3, 30)
+            current = _read_keeper_state(state_path)
+            if current is None or current.get("pid") != os.getpid():
+                # a disconnect/new keeper removed or replaced the state file
+                # while we slept — this keeper no longer owns the session
+                logutil.log("keys keeper: ownership lost, aborting re-arm")
                 break
     except (OSError, ConnectionError) as e:
         logutil.log(f"keys keeper: session error: {e}")
@@ -496,9 +536,8 @@ def run_keeper(kind: str, server_id: str) -> None:
     except Exception as e:  # noqa: BLE001 - always record keeper failures
         logutil.log(f"keys keeper: unexpected error: {e}")
         state.update(status="error", message=str(e))
+        _write_keeper_state(state_path, state, own=True)
     finally:
-        if sock:
-            sock.close()
         state.update(status="exited")
         _write_keeper_state(state_path, state, own=True)
         logutil.log("keys keeper: exited")
@@ -580,7 +619,7 @@ class KeysProvider(VPNProvider):
 
     def _stop_running(self) -> None:
         process_id, iface, _ = _kind_meta(self._kind)
-        if process_id not in _daemon_running_processes():
+        if process_id not in _daemon_running_processes(fresh=True):
             return
         _daemon_request("stop", **{"process-id": process_id})
         deadline = time.time() + 5
@@ -590,8 +629,12 @@ class KeysProvider(VPNProvider):
             time.sleep(0.3)
 
     def disconnect(self, connection: VPNConnection) -> ActionResult:
-        process_id, _, _ = _kind_meta(self._kind)
-        if process_id not in _daemon_running_processes():
+        # Unlinking the keeper state file (all branches) aborts a keeper
+        # that is sleeping between re-arm attempts — do it FIRST so even a
+        # failed stop cannot leave a sleeping keeper behind to resurrect.
+        process_id, _, state_path = _kind_meta(self._kind)
+        state_path.unlink(missing_ok=True)
+        if process_id not in _daemon_running_processes(fresh=True):
             return ActionResult(success=False, message=f"{self.name} is not connected")
         resp = _daemon_request("stop", **{"process-id": process_id})
         if not resp or resp.get("status") not in ("stopping", "success"):

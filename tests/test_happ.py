@@ -13,15 +13,19 @@ def _frame(obj):
 
 class FakeSock:
     """In-memory unix-socket stand-in for _send_frame/_recv_frame: recv()
-    returns b"" (peer closed) once the scripted bytes run out."""
+    returns b"" (peer closed) once the scripted bytes run out; with
+    raise_timeout it raises TimeoutError (socket.timeout) instead."""
 
-    def __init__(self, incoming: bytes = b""):
+    def __init__(self, incoming: bytes = b"", raise_timeout: bool = False):
         self._in = incoming
+        self._raise_timeout = raise_timeout
         self.sent = b""
         self.closed = False
 
     def recv(self, n):
         if not self._in:
+            if self._raise_timeout:
+                raise TimeoutError("socket timeout")
             return b""
         chunk, self._in = self._in[:n], self._in[n:]
         return chunk
@@ -47,6 +51,8 @@ class _FrozenTime:
     @staticmethod
     def time_ns():
         return 12345
+
+    sleep = lambda s: None  # noqa: E731 - time.sleep stand-in
 
 
 def test_frame_round_trip():
@@ -85,6 +91,29 @@ def _run_keeper_env(tmp_path, monkeypatch, sock, cfg):
     monkeypatch.setattr(happmeta, "resolve_config", lambda name: cfg)
     monkeypatch.setattr(happ, "_open_session", lambda: sock)
     monkeypatch.setattr(happ, "_routing_asset_dir", lambda: None)
+    monkeypatch.setattr(happ, "_iface_exists", lambda name: True)
+    monkeypatch.setattr(happ, "time", _FrozenTime)
+    return writes
+
+
+def _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg):
+    """Like _run_keeper_env, but _open_session calls factory() — a FRESH
+    fake socket per session (needed for re-arm tests)."""
+    import happmeta
+
+    writes = []
+    real_write = happ._write_keeper_state
+
+    def recording(state):
+        writes.append(dict(state))
+        real_write(state)
+
+    monkeypatch.setattr(happ, "KEEPER_STATE", tmp_path / "keeper.json")
+    monkeypatch.setattr(happ, "_write_keeper_state", recording)
+    monkeypatch.setattr(happmeta, "resolve_config", lambda name: cfg)
+    monkeypatch.setattr(happ, "_open_session", factory)
+    monkeypatch.setattr(happ, "_routing_asset_dir", lambda: None)
+    monkeypatch.setattr(happ, "_iface_exists", lambda name: False)
     monkeypatch.setattr(happ, "time", _FrozenTime)
     return writes
 
@@ -143,6 +172,76 @@ def test_run_keeper_claim_wins_over_stale_gap_write(tmp_path, monkeypatch):
     assert any(w["status"] == "connected" for w in writes)
 
 
+def test_keeper_rearms_on_iface_gone(tmp_path, monkeypatch):
+    """iface gone -> sleep -> ownership re-check -> a SECOND start frame on a
+    fresh session; the keeper ends in "exited"."""
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+    socks = []
+
+    def factory():
+        # session 1: ack, then socket timeouts with the iface gone; session 2:
+        # ack, then happd closes the connection -> keeper exits (no 3rd arm)
+        sock = FakeSock(
+            _frame({"request-id": "wm-12345", "status": "started"}),
+            raise_timeout=(len(socks) == 0),
+        )
+        socks.append(sock)
+        return sock
+
+    writes = _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg)
+
+    happ.run_keeper("S")
+
+    assert len(socks) == 2
+    starts = [s for s in socks if b'"action": "start"' in s.sent]
+    assert len(starts) == 2  # the keeper re-armed after the iface went away
+    assert writes[-1]["status"] == "exited"
+
+
+def test_keeper_aborts_rearm_when_ownership_lost(tmp_path, monkeypatch):
+    """A foreign pid claiming KEEPER_STATE during the backoff sleep (a new
+    keeper from a server switch, or disconnect invalidation) must abort the
+    re-arm — exactly ONE start frame, no resurrection."""
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+    socks = []
+
+    def factory():
+        sock = FakeSock(
+            _frame({"request-id": "wm-12345", "status": "started"}),
+            raise_timeout=True,
+        )
+        socks.append(sock)
+        return sock
+
+    writes = _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg)
+
+    def seize_ownership(seconds):
+        # simulate a newer keeper claiming the state file mid-sleep
+        (tmp_path / "keeper.json").write_text(json.dumps({"status": "connecting", "pid": 424242}))
+
+    monkeypatch.setattr(_FrozenTime, "sleep", staticmethod(seize_ownership))
+    happ.run_keeper("S")
+
+    starts = [s for s in socks if b'"action": "start"' in s.sent]
+    assert len(starts) == 1  # ownership lost -> never re-armed
+
+
+def test_keeper_no_rearm_on_stopped(tmp_path, monkeypatch):
+    """happd's own "stopped" event is the user's disconnect — the keeper
+    must NOT re-arm; exactly one start frame is sent."""
+    sock = FakeSock(
+        _frame({"request-id": "wm-12345", "status": "started"})
+        + _frame({"event": "stopped"})
+    )
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+    writes = _run_keeper_env(tmp_path, monkeypatch, sock, cfg)
+
+    happ.run_keeper("S")
+
+    assert sock.sent.count(b'"action": "start"') == 1
+    assert writes[-1]["status"] == "exited"
+
+
 def test_guarded_write_respects_foreign_owner(tmp_path, monkeypatch):
     """Race A (server switch): a stale keeper exiting AFTER the new keeper
     claimed the file must not overwrite the newer keeper's state."""
@@ -179,7 +278,7 @@ def _patch_env(monkeypatch, tmp_path, servers, interfaces, processes, last, keep
     monkeypatch.setattr(happmeta, "request_subscription_update", lambda: None)
     monkeypatch.setattr(happmeta, "resolve_config", lambda name: _server(name) if name else None)
     monkeypatch.setattr(happ, "_happ_interfaces", lambda: interfaces)
-    monkeypatch.setattr(happ, "_daemon_running_processes", lambda: processes)
+    monkeypatch.setattr(happ, "_daemon_running_processes", lambda fresh=False: processes)
     monkeypatch.setattr(happ, "_last_server_name", lambda: last)
     state = tmp_path / "keeper.json"
     if keeper_status is not None:
@@ -198,6 +297,50 @@ def test_connections_keys_process_is_not_happ(tmp_path, monkeypatch):
     _patch_env(monkeypatch, tmp_path, servers, [], ["xray-keys-ss"], None, keeper)
     conns = happ.HappProvider().connections()
     assert not any(c.active for c in conns)
+
+
+def test_daemon_procs_file_cache(monkeypatch, tmp_path):
+    """--status ticks are fresh processes; the file cache must collapse
+    repeated happd 'list' queries within the TTL into one."""
+    import json as _json
+
+    cache = tmp_path / "procs.json"
+    monkeypatch.setattr(happ, "PROCS_CACHE", cache)
+    calls = {"n": 0}
+
+    def fake_request(action, **kw):
+        calls["n"] += 1
+        return {"status": "success", "processes": [{"process-id": "xray-core", "running": True}]}
+
+    monkeypatch.setattr(happ, "_daemon_request", fake_request)
+    assert happ._daemon_running_processes() == ["xray-core"]
+    assert happ._daemon_running_processes() == ["xray-core"]  # served from cache
+    assert calls["n"] == 1
+    # stale cache -> requery
+    stale = _json.loads(cache.read_text())
+    stale["at"] = 0
+    cache.write_text(_json.dumps(stale))
+    assert happ._daemon_running_processes() == ["xray-core"]
+    assert calls["n"] == 2
+
+
+def test_procs_cache_corrupt_at(tmp_path, monkeypatch):
+    """A cache file with a non-numeric "at" must fall through to a live
+    happd query instead of raising TypeError."""
+    import json as _json
+
+    cache = tmp_path / "procs.json"
+    cache.write_text(_json.dumps({"at": "x", "procs": []}))
+    monkeypatch.setattr(happ, "PROCS_CACHE", cache)
+    calls = {"n": 0}
+
+    def fake_request(action, **kw):
+        calls["n"] += 1
+        return {"status": "success", "processes": [{"process-id": "xray-core", "running": True}]}
+
+    monkeypatch.setattr(happ, "_daemon_request", fake_request)
+    assert happ._daemon_running_processes() == ["xray-core"]
+    assert calls["n"] == 1
 
 
 def test_connections_lists_subscription_servers(tmp_path, monkeypatch):
