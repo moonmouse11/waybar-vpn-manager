@@ -35,3 +35,16 @@ def test_partial_and_type_safety(tmp_path, monkeypatch):
     assert cfg.killswitch_mode == "off"  # invalid value ignored
     assert cfg.exit_ip_max_age == 60  # clamped to minimum
     assert cfg.exit_ip_enabled is False
+
+
+def test_show_empty_providers_roundtrip(tmp_path, monkeypatch):
+    from config import Config, load_config, save_config
+
+    p = tmp_path / "config.json"
+    monkeypatch.setattr(config, "CONFIG_PATH", p)
+    assert load_config().show_empty_providers is False  # default: hidden
+
+    cfg = Config()
+    cfg.show_empty_providers = True
+    save_config(cfg)
+    assert load_config().show_empty_providers is True

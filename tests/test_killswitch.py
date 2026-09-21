@@ -1,3 +1,6 @@
+import json
+import time
+
 import killswitch
 import providers.base as base
 from providers.base import ActionResult, human_bytes, iface_traffic
@@ -36,6 +39,36 @@ def test_iface_traffic_missing(monkeypatch):
 
     monkeypatch.setattr(base.subprocess, "run", lambda *a, **k: Result())
     assert iface_traffic("nope") is None
+
+
+def test_iface_rate_from_cached_sample(monkeypatch, tmp_path):
+    cache = tmp_path / "rate.json"
+    monkeypatch.setattr(base, "RATE_CACHE", cache)
+    cache.write_text(json.dumps({"wg0": {"rx": 1000, "tx": 500, "at": time.time() - 3}}))
+    # 3 s later: +6144 rx bytes, +1536 tx bytes -> 2048 B/s and 512 B/s
+    monkeypatch.setattr(base, "_iface_counters", lambda iface: (7144, 2036))
+    rate = base.iface_rate("wg0")
+    assert "↓ 2.0 KiB/s" in rate and "↑ 512 B/s" in rate
+
+
+def test_iface_rate_none_without_predecessor_or_on_reset(monkeypatch, tmp_path):
+    cache = tmp_path / "rate.json"
+    monkeypatch.setattr(base, "RATE_CACHE", cache)
+    monkeypatch.setattr(base, "_iface_counters", lambda iface: (100, 100))
+    assert base.iface_rate("wg0") is None  # no cache at all
+    cache.write_text(json.dumps({"wg0": {"rx": 1000, "tx": 1000, "at": time.time() - 3}}))
+    assert base.iface_rate("wg0") is None  # counters reset (delta negative)
+    cache.write_text(json.dumps({"wg0": {"rx": 100, "tx": 100, "at": time.time() - 3}}))
+    assert base.iface_rate("wg0") is None  # no traffic in the window
+
+
+def test_sample_iface_traffic_writes_counters(monkeypatch, tmp_path):
+    cache = tmp_path / "rate.json"
+    monkeypatch.setattr(base, "RATE_CACHE", cache)
+    monkeypatch.setattr(base, "_iface_counters", lambda iface: (4096, 2048))
+    base.sample_iface_traffic("wg0")
+    entry = json.loads(cache.read_text())["wg0"]
+    assert entry["rx"] == 4096 and entry["tx"] == 2048 and entry["at"] > 0
 
 
 def test_is_enabled_probes_via_script(monkeypatch):

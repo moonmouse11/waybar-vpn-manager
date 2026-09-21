@@ -29,6 +29,7 @@ def patch_menu_env(monkeypatch, providers, picks):
     monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager, "request_ip_update", lambda name: None)
     iterator = iter(picks)
     monkeypatch.setattr(
         vpn_manager, "walker_select", lambda options, prompt="VPN": next(iterator, None)
@@ -55,10 +56,9 @@ def test_level1_shows_providers_with_counts(monkeypatch):
     vpn_manager.run_menu()
     options = seen[0]
     assert "WireGuard  (1/2)" in options  # active count suffix
-    assert "Happ" in options  # inactive provider: no count suffix
-    assert not any(o.startswith("Happ  (") for o in options)
+    assert "Happ  (0/1)" in options  # inactive providers show a zero count too
     assert "Disconnect ALL" not in options  # only one active connection
-    assert sum(o in ("WireGuard  (1/2)", "Happ") for o in options) == 2
+    assert sum(o in ("WireGuard  (1/2)", "Happ  (0/1)") for o in options) == 2
 
 
 def test_happ_provider_menu_disambiguates_duplicate_labels(monkeypatch):
@@ -208,7 +208,7 @@ def test_happ_menu_provider_label_without_ping_data(monkeypatch, tmp_path):
 
 def test_two_level_connect(monkeypatch):
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
-    patch_menu_env(monkeypatch, [wg], picks=["WireGuard", "Connect nl"])
+    patch_menu_env(monkeypatch, [wg], picks=["WireGuard  (0/1)", "Connect nl"])
     vpn_manager.run_menu()
     assert wg.connected == ["nl"]
 
@@ -223,7 +223,7 @@ def test_two_level_disconnect_active(monkeypatch):
 def test_back_returns_to_level1(monkeypatch):
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
     # level1 -> WireGuard, level2 -> Back, level1 -> escape
-    patch_menu_env(monkeypatch, [wg], picks=["WireGuard", "‹ Back", None])
+    patch_menu_env(monkeypatch, [wg], picks=["WireGuard  (0/1)", "‹ Back", None])
     vpn_manager.run_menu()
     assert wg.connected == []
 
@@ -377,6 +377,175 @@ def test_killswitch_all_targets_gathers_wg_and_ovpn_only(monkeypatch):
     ips, ifaces = vpn_manager._killswitch_all_targets()
     assert ips == ["93.184.216.34", "93.184.216.35", "93.184.216.37"]  # NM endpoint excluded
     assert ifaces == ["nl", "tun*"]  # wg profile name + OpenVPN glob; long name filtered
+
+
+def test_level1_layout_connected(monkeypatch):
+    """Menu order: current connection (first, with metrics) → providers →
+    quick disconnect, killswitch ALWAYS the last row."""
+    wg = FakeProvider(
+        "WireGuard",
+        [VPNConnection(name="nl", provider="WireGuard", active=True, interface="wg0")],
+    )
+    patch_menu_env(monkeypatch, [wg], picks=[])
+    monkeypatch.setattr(vpn_manager, "iface_rate", lambda iface: "↓ 2.0 MiB/s ↑ 512.0 KiB/s")
+    monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda name, age: "Exit: 1.2.3.4 🇩🇪")
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.run_menu()
+    options = seen[0]
+    assert options[0].startswith("↻ WireGuard: nl")
+    assert "↓ 2.0 MiB/s" in options[0] and "1.2.3.4" in options[0]
+    assert "Disconnect: WireGuard: nl" in options
+    assert options[-1].strip().startswith("Killswitch")
+
+
+def test_reconnect_row_drops_and_reconnects(monkeypatch):
+    """Selecting the current-connection row is a reconnect: disconnect the
+    server, then connect it again."""
+    wg = FakeProvider(
+        "WireGuard",
+        [VPNConnection(name="nl", provider="WireGuard", active=True, interface="wg0")],
+    )
+    patch_menu_env(monkeypatch, [wg], picks=["↻ WireGuard: nl"])
+    result = vpn_manager.menu_loop()
+    assert result.success
+    assert wg.disconnected == ["nl"] and wg.connected == ["nl"]
+
+
+def test_no_vpn_row_shows_current_ip(monkeypatch):
+    """Disconnected: the first row is the real public IP (not a VPN one)."""
+    wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    patch_menu_env(monkeypatch, [wg], picks=[])
+    monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda name, age: "Exit: 95.24.1.2 🇷🇺")
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.run_menu()
+    assert seen[0][0] == "● No VPN · 95.24.1.2 🇷🇺"
+
+
+def test_no_vpn_row_when_cache_stale_and_ip_disabled(monkeypatch):
+    """Stale cache -> bare '● No VPN' row and a background fetch; exit_ip
+    disabled in config -> no row at all."""
+    wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    patch_menu_env(monkeypatch, [wg], picks=[])
+    monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda name, age: None)
+    fetched = []
+    monkeypatch.setattr(vpn_manager, "request_ip_update", fetched.append)
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.run_menu()
+    assert seen[0][0] == "● No VPN"
+    assert fetched == [vpn_manager.NO_VPN]
+
+    cfg = config.Config()
+    cfg.exit_ip_enabled = False
+    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: cfg)
+    vpn_manager.run_menu()
+    assert seen[1][0] == "WireGuard  (0/1)"  # no IP row, providers start right away
+
+
+def test_level1_disconnect_all_label_for_multiple(monkeypatch):
+    wg = FakeProvider(
+        "WireGuard",
+        [VPNConnection(name="nl", provider="WireGuard", active=True, interface="wg0")],
+    )
+    happ = FakeProvider("Happ", [VPNConnection(name="de", provider="Happ", active=True)])
+    patch_menu_env(monkeypatch, [wg, happ], picks=[])
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.run_menu()
+    options = seen[0]
+    assert "Disconnect ALL  (2)" in options
+    assert options[-1].strip().startswith("Killswitch")
+
+
+def test_level1_no_disconnect_row_when_idle(monkeypatch):
+    wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    patch_menu_env(monkeypatch, [wg], picks=[])
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.run_menu()
+    options = seen[0]
+    assert not any(o.startswith("Disconnect") for o in options)
+    assert not any(o.startswith("▶") for o in options)
+    assert options[-1].strip().startswith("Killswitch")
+
+
+def test_menu_loop_shows_named_outline_row_when_empty(monkeypatch):
+    """Opt-in (show_empty_providers): with no servers Outline appears as a
+    named row whose action is the key import."""
+    wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    outline = FakeProvider("Outline", [])
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [wg, outline])
+    cfg = config.Config()
+    cfg.show_empty_providers = True
+    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: cfg)
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
+    monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    monkeypatch.setattr(vpn_manager, "request_ip_update", lambda name: None)
+    imported = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "import_config_file",
+        lambda p, t: imported.append(t) or ActionResult(True, ""),
+    )
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (
+            seen.append(list(options))
+            or next((o for o in options if o.startswith("Outline")), None)
+        ),
+    )
+    vpn_manager.menu_loop()
+    assert any(o.startswith("Outline") for o in seen[0])
+    assert seen[0][-1].strip().startswith("Killswitch")  # killswitch always last
+    assert imported == ["Outline"]
+
+
+def test_menu_loop_hides_empty_outline_by_default(monkeypatch):
+    """Default config: no Outline row at all (providers without connections
+    stay hidden)."""
+    wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    outline = FakeProvider("Outline", [])
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [wg, outline])
+    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: config.Config())
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
+    monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    monkeypatch.setattr(vpn_manager, "request_ip_update", lambda name: None)
+    monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda name, age: None)
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.menu_loop()
+    assert not any(o.startswith("Outline") for o in seen[0])
+    assert seen[0][-1].strip().startswith("Killswitch")
 
 
 def test_killswitch_item_toggle_gathers_targets(monkeypatch, tmp_path):

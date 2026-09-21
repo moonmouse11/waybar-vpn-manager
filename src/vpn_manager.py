@@ -20,7 +20,13 @@ import ipinfo
 import killswitch
 import logutil
 from providers import ALL_PROVIDERS
-from providers.base import ActionResult, VPNConnection, iface_traffic
+from providers.base import (
+    ActionResult,
+    VPNConnection,
+    iface_rate,
+    iface_traffic,
+    sample_iface_traffic,
+)
 
 WAYBAR_SIGNAL = 11
 
@@ -38,6 +44,9 @@ def active_connections(providers=None) -> list[VPNConnection]:
         for conn in provider.connections()
         if conn.active
     ]
+
+
+NO_VPN = "direct"  # pseudo-connection key for the ipinfo cache when no VPN is up
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -70,6 +79,7 @@ def get_status() -> dict:
             traffic = iface_traffic(conn.interface)
             if traffic:
                 line += f"\n  {traffic}"
+            sample_iface_traffic(conn.interface)  # next tick can show a rate
         tooltip.append(line)
 
     if cfg.exit_ip_enabled:
@@ -112,7 +122,7 @@ def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
     ks_result = None
     if provider.name == "Happ":
         ks_result = killswitch.resume_for_happ()
-    elif killswitch.mode() == "all" and provider.name in ("WireGuard", "OpenVPN"):
+    elif killswitch.mode() == "all" and provider.name in ("WireGuard", "OpenVPN", "Outline"):
         ips, ifaces = _killswitch_all_targets()
         ks_result = killswitch.enable(extra_ips=ips, ifaces=ifaces)
     elif killswitch.is_enabled():
@@ -180,8 +190,8 @@ def manage_profiles(provider) -> ActionResult:
 
 
 def _killswitch_all_targets() -> tuple[list[str], list[str]]:
-    """'all' mode whitelist: IPv4 of every configured WireGuard/OpenVPN
-    endpoint + the tunnel interface names to allow through.
+    """'all' mode whitelist: IPv4 of every configured WireGuard/OpenVPN/
+    Outline endpoint + the tunnel interface names to allow through.
 
     NetworkManager endpoints are not parsed (v1) — connecting one suspends
     the killswitch instead. One broken provider must not stop the others
@@ -189,8 +199,8 @@ def _killswitch_all_targets() -> tuple[list[str], list[str]]:
     targets: list[tuple[str, str, int]] = []
     ifaces: list[str] = []
     for provider in ALL_PROVIDERS:
-        if provider.name not in ("WireGuard", "OpenVPN"):
-            continue
+        if provider.name == "NetworkManager":
+            continue  # endpoints not parsed (v1) — connecting one suspends the killswitch
         try:
             pt = provider.ping_targets()
         except Exception:
@@ -206,8 +216,11 @@ def _killswitch_all_targets() -> tuple[list[str], list[str]]:
             for n, _, _ in pt:
                 if len(n) > 15:
                     logutil.log(f"killswitch: iface name too long, skipped: {n}")
-        elif pt:
-            ifaces.append("tun*")  # OpenVPN tunnel interfaces
+        elif provider.name == "OpenVPN":
+            if pt:
+                ifaces.append("tun*")  # OpenVPN tunnel interfaces
+        elif provider.name == "Outline" and pt:
+            ifaces.append("outline-tun0")
     return killswitch.resolve_endpoint_ips(targets), sorted(set(ifaces))
 
 
@@ -233,6 +246,8 @@ def provider_actions(provider) -> list[tuple[str, callable]]:
         ]
     if provider.name == "OpenVPN":
         return [("  Import OpenVPN config...", lambda: import_config_file(provider, "OpenVPN"))]
+    if provider.name == "Outline":
+        return [("  Import Outline key...", lambda: import_config_file(provider, "Outline"))]
     if provider.name == "NetworkManager":
         return [
             (
@@ -245,25 +260,98 @@ def provider_actions(provider) -> list[tuple[str, callable]]:
 
 
 def menu_loop() -> ActionResult:
-    """Level 1: pick a provider (or a global action)."""
+    """Level 1: the active connection with metrics, providers to pick from,
+    quick disconnect, and the killswitch toggle — always the last row."""
     items: list[tuple[str, callable]] = []
 
     all_active = active_connections(providers=list(ALL_PROVIDERS))
-    if len(all_active) > 1:
-        items.append(("Disconnect ALL", disconnect_all))
+    if all_active:
+        items.append(_current_connection_item(all_active[0]))
+    else:
+        ip_row = _no_vpn_ip_item()
+        if ip_row:
+            items.append(ip_row)
 
     for provider in visible_providers():
         conns = provider.connections()
         if not conns:
             continue
         active = sum(1 for c in conns if c.active)
-        label = provider.name
-        if active:
-            label += f"  ({active}/{len(conns)})"
-        items.append((label, lambda p=provider: provider_menu(p)))
+        items.append((f"{provider.name}  ({active}/{len(conns)})", lambda p=provider: provider_menu(p)))
 
-    items.append(_killswitch_item())
+    # Empty providers are hidden (level 1 lists providers with connections);
+    # the Outline import row below is opt-in via show_empty_providers.
+    cfg = config.load_config()
+    outline = next((p for p in visible_providers() if p.name == "Outline"), None)
+    if cfg.show_empty_providers and outline is not None and not outline.connections():
+        items.append(
+            (
+                "Outline  (no servers — click to import)",
+                lambda: import_config_file(outline, "Outline"),
+            )
+        )
+
+    if all_active:
+        if len(all_active) == 1:
+            first = all_active[0]
+            items.append((f"Disconnect: {first.provider}: {first.name}", disconnect_all))
+        else:
+            items.append((f"Disconnect ALL  ({len(all_active)})", disconnect_all))
+
+    items.append(_killswitch_item())  # always the last row
     return run_items(items, prompt="VPN")
+
+
+def _current_connection_item(conn: VPNConnection) -> tuple[str, callable]:
+    """First menu row: what is connected, live rate, exit IP. Selecting it
+    RECONNECTS the same server (drop + connect, with killswitch interplay)."""
+    label = f"↻ {conn.provider}: {conn.name}"
+    rate = iface_rate(conn.interface)
+    if rate:
+        label += f"  {rate}"
+    cfg = config.load_config()
+    if cfg.exit_ip_enabled:
+        exit_line = ipinfo.status_line(conn.name, cfg.exit_ip_max_age)
+        if exit_line:
+            label += f" · {exit_line.removeprefix('Exit: ')}"
+        else:
+            request_ip_update(conn.name)
+    return (label, lambda: _reconnect(conn))
+
+
+def _reconnect(conn: VPNConnection) -> ActionResult:
+    provider = next((p for p in ALL_PROVIDERS if p.name == conn.provider), None)
+    if provider is None:
+        return ActionResult(False, f"Unknown provider: {conn.provider}")
+    down = provider.disconnect(conn)
+    if not down.success:
+        return down
+    return guarded_connect(provider, conn)
+
+
+def _no_vpn_ip_item() -> tuple[str, callable] | None:
+    """Not connected: the first row shows the real public IP (cache-first —
+    the --status tick is not running to refresh it, so trigger a fetch when
+    stale). Click re-fetches and shows the full line."""
+    cfg = config.load_config()
+    if not cfg.exit_ip_enabled:
+        return None
+    exit_line = ipinfo.status_line(NO_VPN, cfg.exit_ip_max_age)
+    if exit_line is None:
+        request_ip_update(NO_VPN)
+        label = "● No VPN"
+    else:
+        label = f"● No VPN · {exit_line.removeprefix('Exit: ')}"
+
+    def _refresh() -> ActionResult:
+        line = ipinfo.status_line(NO_VPN, cfg.exit_ip_max_age)
+        if line is None:
+            request_ip_update(NO_VPN)
+            return ActionResult(True, "IP refresh started — reopen the menu to see it")
+        notify("VPN", line)
+        return ActionResult(True, "")
+
+    return (label, _refresh)
 
 
 def provider_menu(provider) -> ActionResult:
@@ -324,8 +412,22 @@ def happ_menu(provider) -> ActionResult:
         if suffixes:
             label += "  (" + " · ".join(suffixes) + ")"
         items.append((label, lambda p=pname, g=group: happ_provider_menu(provider, p, g)))
+    items.append(("  Refresh subscriptions", _refresh_subscriptions))
     items.append(("‹ Back", back_to_main))
     run_items(items, prompt="Happ")
+
+
+def _refresh_subscriptions() -> ActionResult:
+    """Manual Happ subscription refresh — fire-and-forget (fetches can take
+    tens of seconds); the menu rebuilds with fresh servers on next open."""
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__)), "--update-subs"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    notify("Happ", "Subscription refresh started — reopen the menu in a few seconds")
+    return ActionResult(True, "")
     return ActionResult(True, "")
 
 
@@ -529,6 +631,11 @@ def main():
         help="Hold the happd session that owns the xray process (internal)",
     )
     group.add_argument(
+        "--outline-keeper",
+        metavar="SERVER_ID",
+        help="Hold the happd session that owns the Outline xray process (internal)",
+    )
+    group.add_argument(
         "--update-ping",
         action="store_true",
         help="Refresh Happ server ping cache in the background (internal)",
@@ -554,6 +661,10 @@ def main():
         from providers.happ import run_keeper
 
         run_keeper(args.happ_keeper or None)
+    elif args.outline_keeper is not None:
+        from providers.outline import run_keeper as run_outline_keeper
+
+        run_outline_keeper(args.outline_keeper)
 
 
 if __name__ == "__main__":
