@@ -93,11 +93,20 @@ def suspend_for(provider_name: str) -> ActionResult:
     return result
 
 
-def resume_for_happ() -> ActionResult | None:
+def resume_for_happ(extra_ips: list[str] | None = None) -> ActionResult | None:
     """On Happ connect: refresh whitelist / re-enable if auto mode asks for it.
 
-    Returns None when there is nothing to do.
-    """
+    extra_ips is the resolved address of the server being connected —
+    detect() cannot see it yet (xray has no established session before the
+    connect), so the caller passes it explicitly. Returns None when there
+    is nothing to do."""
+    if extra_ips is not None:
+        # rebuild the rules around the known server address
+        if is_enabled():
+            return enable(extra_ips=extra_ips)
+        if mode() in ("happ", "all"):
+            return enable(extra_ips=extra_ips)
+        return None
     if is_enabled():
         return redetect()
     if mode() in ("happ", "all"):

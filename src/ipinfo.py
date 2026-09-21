@@ -8,6 +8,7 @@ Cache: ~/.cache/vpn-manager/exit_ip.json
 """
 
 import json
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -65,11 +66,26 @@ def update(connection: str) -> None:
         return  # another background run handled this very recently
 
     entry: dict = {"connection": connection, "fetched_at": time.time()}
-    try:
-        entry.update(_fetch())
-    except OSError as e:
-        entry["error"] = str(e)[:120]
-        logutil.log(f"exit-ip fetch failed: {entry['error']}")
+    # urlopen's timeout does not cover DNS resolution — a stuck getaddrinfo
+    # kept an --update-ip process alive for days once. Guard with a thread.
+    result: dict = {}
+
+    def _work() -> None:
+        try:
+            result.update(_fetch())
+        except OSError as e:
+            result["error"] = str(e)[:120]
+
+    worker = threading.Thread(target=_work, daemon=True)
+    worker.start()
+    worker.join(timeout=15)
+    if worker.is_alive():
+        entry["error"] = "timeout (DNS?)"
+        logutil.log("exit-ip fetch timed out")
+    else:
+        entry.update(result)
+        if "error" in entry:
+            logutil.log(f"exit-ip fetch failed: {entry['error']}")
 
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)

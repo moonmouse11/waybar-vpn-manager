@@ -120,6 +120,16 @@ def _daemon_running_processes() -> list[str]:
     ]
 
 
+KEYS_PROCESS_PREFIX = "xray-keys-"
+
+
+def _happ_processes() -> list[str]:
+    """Happ's own managed processes. The keys providers run their xray
+    through the same happd — those must not count as 'Happ connected'
+    (phantom server in the menu) nor get stopped by a Happ disconnect."""
+    return [p for p in _daemon_running_processes() if not p.startswith(KEYS_PROCESS_PREFIX)]
+
+
 def _happ_interfaces() -> list[str]:
     code, out = _run(["ip", "-o", "link", "show"])
     if code != 0:
@@ -334,7 +344,7 @@ class HappProvider(VPNProvider):
 
     def connections(self) -> list[VPNConnection]:
         interfaces = _happ_interfaces()
-        processes = _daemon_running_processes()
+        processes = _happ_processes()
         is_active = bool(interfaces or processes)
 
         # Full server list from provider subscriptions (+ captured extras).
@@ -429,7 +439,7 @@ class HappProvider(VPNProvider):
     def _stop_running(self) -> None:
         """Stop managed processes and wait for the tunnel to come down
         (used when switching servers)."""
-        processes = _daemon_running_processes()
+        processes = _happ_processes()
         if not processes:
             return
         for process_id in processes:
@@ -467,7 +477,7 @@ class HappProvider(VPNProvider):
         return ActionResult(False, "keeper timeout — see log")
 
     def disconnect(self, connection: VPNConnection) -> ActionResult:
-        processes = _daemon_running_processes()
+        processes = _happ_processes()
         if not processes:
             return ActionResult(success=False, message="Happ is not connected")
 

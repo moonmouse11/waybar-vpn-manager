@@ -35,7 +35,9 @@ XRAY_CONFIGS = Path.home() / ".config/happ-capture/xray-configs.json"
 HEADERS_FILE = Path.home() / ".config/happ-capture/headers.json"
 SUB_CACHE_DIR = Path.home() / ".cache/vpn-manager"
 
-PING_MAX_AGE = 300  # seconds
+PING_MAX_AGE = 1800  # seconds — also the sweep cadence; 5 min of TCP
+# connects to every server every cycle likely tripped server-side rate
+# limits (the ARTEMIDA IP ban), and menu marks tolerate 30 min of staleness
 SUB_MAX_AGE = 3600  # seconds
 SUBS_REFRESH_RETRY = 60  # seconds, avoid spawning a worker per status tick when the tunnel is down
 PING_TIMEOUT = 3.0
@@ -516,10 +518,10 @@ def match_server(name: str, servers: list[dict]) -> dict | None:
     return subs[0] if len(subs) == 1 else None
 
 
-def resolve_config(name: str) -> dict | None:
+def resolve_config(name: str, allow_fetch: bool = True) -> dict | None:
     """Runnable xray config for a server name: merged from the subscription
     when available, otherwise a captured config used as-is."""
-    servers = all_servers()
+    servers = all_servers(allow_fetch=allow_fetch)
     server = match_server(name, servers)
     if server is not None:
         if server["provider_id"]:
@@ -531,9 +533,9 @@ def resolve_config(name: str) -> dict | None:
 # ── Server params / labels ────────────────────────────────────────────────────
 
 
-def server_params(name: str) -> dict | None:
+def server_params(name: str, allow_fetch: bool = True) -> dict | None:
     """{host, port, protocol, network, security} for a server."""
-    cfg = resolve_config(name)
+    cfg = resolve_config(name, allow_fetch=allow_fetch)
     if not cfg:
         return None
     try:

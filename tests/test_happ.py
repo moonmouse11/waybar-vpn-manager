@@ -187,6 +187,19 @@ def _patch_env(monkeypatch, tmp_path, servers, interfaces, processes, last, keep
     monkeypatch.setattr(happ, "KEEPER_STATE", state)
 
 
+def test_connections_keys_process_is_not_happ(tmp_path, monkeypatch):
+    """The keys providers run their xray through the same happd — a
+    'xray-keys-*' process must not mark any Happ server active (phantom
+    connection in the menu), even with a stale connected keeper state."""
+    servers = [
+        {"name": "🇩🇪 Germany 1", "provider_id": "1", "provider_name": "P", "config": {}},
+    ]
+    keeper = {"status": "connected", "server": "🇩🇪 Germany 1"}
+    _patch_env(monkeypatch, tmp_path, servers, [], ["xray-keys-ss"], None, keeper)
+    conns = happ.HappProvider().connections()
+    assert not any(c.active for c in conns)
+
+
 def test_connections_lists_subscription_servers(tmp_path, monkeypatch):
     servers = [
         {"name": "🇦🇹 Austria", "provider_id": "1", "provider_name": "P", "config": {}},

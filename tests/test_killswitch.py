@@ -180,6 +180,31 @@ def test_resolve_endpoint_ips(monkeypatch):
     assert killswitch.resolve_endpoint_ips([("v6", "v6-only.example", 1)]) == []
 
 
+def test_resume_for_happ_extra_ips_bypass_detect(monkeypatch, tmp_path):
+    """Happ connect under killswitch: the caller passes the resolved server
+    IP (detect can't see the session before connect); rules rebuild around
+    it whether the killswitch is already on or being enabled by mode."""
+    monkeypatch.setattr(killswitch.config, "CONFIG_PATH", tmp_path / "config.json")
+    calls = []
+    monkeypatch.setattr(
+        killswitch, "enable", lambda **kw: calls.append(kw) or ActionResult(True, "ok")
+    )
+    monkeypatch.setattr(killswitch, "is_enabled", lambda: True)
+    assert killswitch.resume_for_happ(extra_ips=["2.26.86.35"]).success
+    assert calls == [{"extra_ips": ["2.26.86.35"]}]
+
+    monkeypatch.setattr(killswitch, "is_enabled", lambda: False)
+    cfg = killswitch.config.load_config()
+    cfg.killswitch_mode = "all"
+    killswitch.config.save_config(cfg)
+    assert killswitch.resume_for_happ(extra_ips=["2.26.86.35"]).success
+    assert calls[-1] == {"extra_ips": ["2.26.86.35"]}
+
+    cfg.killswitch_mode = "off"
+    killswitch.config.save_config(cfg)
+    assert killswitch.resume_for_happ(extra_ips=["2.26.86.35"]) is None
+
+
 def test_suspend_for_keeps_preference(monkeypatch, tmp_path):
     monkeypatch.setattr(killswitch.config, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(killswitch, "disable", lambda: ActionResult(True, "ok"))

@@ -405,7 +405,7 @@ def test_server_info_suffix_availability(tmp_path, monkeypatch):
             {
                 "up": {"ms": 42.0, "at": now},
                 "down": {"ms": None, "at": now},  # measured but unreachable
-                "stale": {"ms": 1.0, "at": now - 999},
+                "stale": {"ms": 1.0, "at": now - 9999},
             }
         )
     )
@@ -419,7 +419,7 @@ def test_server_info_suffix_availability(tmp_path, monkeypatch):
 def test_ping_cache_expiry(tmp_path, monkeypatch):
     ping_file = tmp_path / "ping.json"
     monkeypatch.setattr(happmeta, "PING_CACHE", ping_file)
-    ping_file.write_text(json.dumps({"x": {"ms": 42.0, "at": time.time() - 999}}))
+    ping_file.write_text(json.dumps({"x": {"ms": 42.0, "at": time.time() - 9999}}))
     assert happmeta.ping_ms("x") is None
 
 
@@ -433,7 +433,7 @@ def test_provider_ping_summary(tmp_path, monkeypatch):
                 "fresh10": {"ms": 10.0, "at": now},
                 "fresh20": {"ms": 20.0, "at": now},
                 "fresh30": {"ms": 30.0, "at": now},
-                "stale": {"ms": 5.0, "at": now - 999},
+                "stale": {"ms": 5.0, "at": now - 9999},
                 "null_ms": {"ms": None, "at": now},  # measured but unreachable
             }
         )

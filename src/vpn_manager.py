@@ -121,12 +121,43 @@ def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
     """
     ks_result = None
     if provider.name == "Happ":
-        ks_result = killswitch.resume_for_happ()
-    elif killswitch.mode() == "all" and provider.name in ("WireGuard", "OpenVPN", "Outline"):
+        # Under an enabled killswitch detect() finds nothing pre-connect
+        # (no established xray sessions yet), so resolve the target
+        # server up front and whitelist it explicitly — otherwise xray is
+        # blocked from reaching it and the tunnel comes up dead.
+        ips: list[str] = []
+        # cache-only: a menu click must never block on a subscription fetch
+        # (the background --update-subs keeps the caches fresh)
+        params = happmeta.server_params(connection.name, allow_fetch=False)
+        if params:
+            ips = killswitch.resolve_endpoint_ips(
+                [(connection.name, params["host"], params["port"])]
+            )
+        ks_result = killswitch.resume_for_happ(extra_ips=ips)
+    elif killswitch.mode() == "all" and provider.name in (
+        "WireGuard",
+        "OpenVPN",
+        "VLESS",
+        "Shadowsocks",
+    ):
         ips, ifaces = _killswitch_all_targets()
         ks_result = killswitch.enable(extra_ips=ips, ifaces=ifaces)
     elif killswitch.is_enabled():
         ks_result = killswitch.suspend_for(provider.name)
+
+    # one tunnel at a time: tear down anything else that is up before
+    # connecting (two VPNs fight over the default route and traffic splits
+    # unpredictably). Same-provider server switching is handled inside the
+    # providers themselves (Happ/Keys stop their previous xray first).
+    others = [
+        c
+        for c in active_connections(providers=list(ALL_PROVIDERS))
+        if not (c.provider == provider.name and c.name == connection.name)
+    ]
+    if others:
+        down = disconnect_all()
+        if not down.success:
+            return down
 
     result = provider.connect(connection)
     if ks_result and not ks_result.success:
@@ -191,7 +222,7 @@ def manage_profiles(provider) -> ActionResult:
 
 def _killswitch_all_targets() -> tuple[list[str], list[str]]:
     """'all' mode whitelist: IPv4 of every configured WireGuard/OpenVPN/
-    Outline endpoint + the tunnel interface names to allow through.
+    Keys endpoint + the tunnel interface names to allow through.
 
     NetworkManager endpoints are not parsed (v1) — connecting one suspends
     the killswitch instead. One broken provider must not stop the others
@@ -219,8 +250,8 @@ def _killswitch_all_targets() -> tuple[list[str], list[str]]:
         elif provider.name == "OpenVPN":
             if pt:
                 ifaces.append("tun*")  # OpenVPN tunnel interfaces
-        elif provider.name == "Outline" and pt:
-            ifaces.append("outline-tun0")
+        elif provider.name in ("VLESS", "Shadowsocks") and pt:
+            ifaces.append(provider.tunnel_iface)
     return killswitch.resolve_endpoint_ips(targets), sorted(set(ifaces))
 
 
@@ -246,8 +277,8 @@ def provider_actions(provider) -> list[tuple[str, callable]]:
         ]
     if provider.name == "OpenVPN":
         return [("  Import OpenVPN config...", lambda: import_config_file(provider, "OpenVPN"))]
-    if provider.name == "Outline":
-        return [("  Import Outline key...", lambda: import_config_file(provider, "Outline"))]
+    if provider.name in ("VLESS", "Shadowsocks"):
+        return [("  Import key...", lambda: import_config_file(provider, provider.name))]
     if provider.name == "NetworkManager":
         return [
             (
@@ -280,14 +311,18 @@ def menu_loop() -> ActionResult:
         items.append((f"{provider.name}  ({active}/{len(conns)})", lambda p=provider: provider_menu(p)))
 
     # Empty providers are hidden (level 1 lists providers with connections);
-    # the Outline import row below is opt-in via show_empty_providers.
+    # the empty key-provider import rows below are opt-in via
+    # show_empty_providers (a key of either kind lands under its protocol).
     cfg = config.load_config()
-    outline = next((p for p in visible_providers() if p.name == "Outline"), None)
-    if cfg.show_empty_providers and outline is not None and not outline.connections():
+    for keys_prov in visible_providers():
+        if keys_prov.name not in ("VLESS", "Shadowsocks") or keys_prov.connections():
+            continue
+        if not cfg.show_empty_providers:
+            break
         items.append(
             (
-                "Outline  (no servers — click to import)",
-                lambda: import_config_file(outline, "Outline"),
+                f"{keys_prov.name}  (no servers — click to import)",
+                lambda p=keys_prov: import_config_file(p, p.name),
             )
         )
 
@@ -543,6 +578,9 @@ def run_items(items: list[tuple[str, callable]], prompt: str) -> ActionResult:
     return result
 
 
+WALKER_TIMEOUT = 120  # seconds — a wedged walker service must not hang the menu forever
+
+
 def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
     try:
         result = subprocess.run(
@@ -550,14 +588,26 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
             input="\n".join(options),
             capture_output=True,
             text=True,
+            timeout=WALKER_TIMEOUT,
         )
-        # rstrip('\n') only: the trailing newline is walker's, the rest of
-        # the line is the user's selection.
-        selected = result.stdout.rstrip("\n")
-        return selected if selected else None
+    except subprocess.TimeoutExpired:
+        # the walker gapplication-service occasionally wedges: no window and
+        # the client hangs forever. SIGKILL the service (it ignores SIGTERM)
+        # — dbus activation brings up a fresh one on the next invocation.
+        logutil.log(f"walker timed out after {WALKER_TIMEOUT}s — restarting the service")
+        subprocess.run(["pkill", "-9", "-f", "walker --gapplication-service"], capture_output=True)
+        subprocess.run(["pkill", "-f", "walker -d"], capture_output=True)
+        notify("VPN — Error", "walker завис — сервис перезапущен, откройте меню ещё раз", urgent=True)
+        return None
     except FileNotFoundError:
         notify("Error", "walker not found", urgent=True)
         return None
+    # rstrip('\n') only: the trailing newline is walker's, the rest of
+    # the line is the user's selection.
+    selected = result.stdout.rstrip("\n")
+    if not selected:
+        logutil.log("walker returned no selection")
+    return selected if selected else None
 
 
 def import_config_file(provider, title: str) -> ActionResult:
@@ -631,9 +681,10 @@ def main():
         help="Hold the happd session that owns the xray process (internal)",
     )
     group.add_argument(
-        "--outline-keeper",
-        metavar="SERVER_ID",
-        help="Hold the happd session that owns the Outline xray process (internal)",
+        "--keys-keeper",
+        nargs=2,
+        metavar=("KIND", "SERVER_ID"),
+        help="Hold the happd session that owns a key xray process (internal)",
     )
     group.add_argument(
         "--update-ping",
@@ -661,10 +712,10 @@ def main():
         from providers.happ import run_keeper
 
         run_keeper(args.happ_keeper or None)
-    elif args.outline_keeper is not None:
-        from providers.outline import run_keeper as run_outline_keeper
+    elif args.keys_keeper is not None:
+        from providers.keys import run_keeper as run_keys_keeper
 
-        run_outline_keeper(args.outline_keeper)
+        run_keys_keeper(*args.keys_keeper)
 
 
 if __name__ == "__main__":
