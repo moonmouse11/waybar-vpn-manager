@@ -4,7 +4,7 @@ All keys optional; missing file means defaults:
 
 {
   "providers": {"openvpn": false},      // hide providers from menu/status
-  "killswitch_mode": "happ",            // "off" | "happ" — auto-manage killswitch
+  "killswitch_mode": "all",             // "off" | "happ" | "all" — auto-manage killswitch
   "exit_ip": {"enabled": true, "max_age_seconds": 600}
 }
 """
@@ -41,7 +41,7 @@ def load_config() -> Config:
     if isinstance(providers, dict):
         cfg.providers = {str(k).lower(): bool(v) for k, v in providers.items()}
 
-    if raw.get("killswitch_mode") in ("off", "happ"):
+    if raw.get("killswitch_mode") in ("off", "happ", "all"):
         cfg.killswitch_mode = raw["killswitch_mode"]
 
     exit_ip = raw.get("exit_ip")

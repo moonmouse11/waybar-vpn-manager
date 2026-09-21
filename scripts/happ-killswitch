@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# happ-killswitch — killswitch для Happ в TUN-режиме.
+# happ-killswitch — killswitch для VPN-подключений (Happ, WireGuard, OpenVPN).
 #
 # Режет ВЕСЬ исходящий трафик, кроме:
-#   - интерфейса happ-* (сам туннель)
+#   - VPN-туннелей (happ-*, плюс интерфейсы, переданные через --iface)
+#   - DNS (udp/tcp dport 53 — без него не резолвятся хостнеймы эндпоинтов)
 #   - локальных сетей (LAN, роутер, DHCP)
-#   - IP VPN-серверов Happ из конфига (иначе туннель не поднимется)
+#   - IP VPN-серверов из конфига + IP, переданные аргументами (сервер Happ
+#     из ~/.config/happ-killswitch.conf + резолвленные эндпоинты WG/OpenVPN)
 #
 # Итог: туннель жив = есть интернет; туннель умер = интернета нет вообще.
 #
 # Использование:
-#   happ-killswitch detect   # определить IP сервера (Happ должен быть подключён)
-#   happ-killswitch on       # включить killswitch
-#   happ-killswitch off      # выключить (полный откат)
-#   happ-killswitch status   # показать текущие правила
+#   happ-killswitch detect                 # IP сервера Happ (Happ должен быть подключён)
+#   happ-killswitch on [IP…] [--iface ИМЯ] # включить (аргументы — доп. IP серверов
+#                                          # WG/OpenVPN, --iface — разрешённые tun-интерфейсы)
+#   happ-killswitch off                    # выключить (полный откат)
+#   happ-killswitch status                 # показать текущие правила
 #
 # Требует root для on/off (sudo). Устанавливается в /usr/local/bin
 # с root-владением — см. install.sh проекта waybar-vpn-manager.
@@ -55,12 +58,46 @@ detect() {
 }
 
 on() {
-    load_ips
-    local addrs="" ip
-    for ip in $SERVER_IPS; do
+    # Аргументы: дополнительные IP серверов (позиционные) + --iface ИМЯ
+    # (разрешённые выходные интерфейсы туннелей, например --iface wg0 --iface 'tun*').
+    local extra_ips=() ifaces=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --iface) [[ $# -ge 2 ]] || die "--iface требует имя интерфейса"
+                     ifaces+=("$2"); shift 2 ;;
+            *)       extra_ips+=("$1"); shift ;;
+        esac
+    done
+
+    # Whitelist = SERVER_IPS из конфига (Happ detect) + переданные IP.
+    local ips=""
+    if [[ -f $CONF ]]; then
+        # shellcheck disable=SC1090
+        . "$CONF"
+        ips="${SERVER_IPS:-}"
+    fi
+    local ip
+    for ip in "${extra_ips[@]}"; do
+        ips+=" $ip"
+    done
+    ips="${ips# }"
+    [[ -n $ips ]] || die "whitelist пуст — сначала: happ-killswitch detect (Happ должен быть подключён)"
+
+    local addrs=""
+    for ip in $ips; do
         addrs+="    ip daddr $ip accept
 "
     done
+    local iface_rules=""
+    local iface
+    for iface in "${ifaces[@]}"; do
+        iface_rules+="    oifname \"$iface\"    accept
+"
+    done
+
+    # Идемпотентно: пересоздаём таблицу целиком, чтобы повторный вызов
+    # (переключение сервера/провайдера) просто пересобирал правила.
+    $SUDO nft delete table inet happ-ks 2>/dev/null || true
     $SUDO nft -f - <<EOF
 table inet happ-ks {
   chain output {
@@ -68,6 +105,8 @@ table inet happ-ks {
 
     oifname "lo"        accept
     oifname "happ-*"    accept
+$iface_rules    udp dport 53          accept
+    tcp dport 53          accept
 $addrs
     ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept
     ip daddr 224.0.0.0/4 accept
@@ -76,12 +115,12 @@ $addrs
   }
 }
 EOF
-    echo "killswitch ВКЛЮЧЁН (сервера: $SERVER_IPS)"
+    echo "killswitch ВКЛЮЧЁН (сервера: $ips)"
 }
 
 off() {
     $SUDO nft delete table inet happ-ks 2>/dev/null \
-        && echo "killswitch ВЫКЛЮЧЕН, правила удалены" \
+        && echo "killswitch ВЫКЛЮЧЁН, правила удалены" \
         || echo "killswitch и не был включён"
 }
 
@@ -95,10 +134,17 @@ status() {
     fi
 }
 
+is_on() {
+    # exit 0 когда таблица есть. Для непривилегированных вызывающих:
+    #   sudo -n happ-killswitch is-on   (nft напрямую требует CAP_NET_ADMIN)
+    nft list table inet happ-ks >/dev/null 2>&1
+}
+
 case "${1:-}" in
-    detect) detect ;;
-    on)     on ;;
-    off)    off ;;
-    status) status ;;
+    detect) shift; detect "$@" ;;
+    on)     shift; on "$@" ;;
+    off)    shift; off "$@" ;;
+    status) shift; status "$@" ;;
+    is-on)  shift; is_on "$@" ;;
     *)      grep '^#' "$0" | head -20; exit 1 ;;
 esac

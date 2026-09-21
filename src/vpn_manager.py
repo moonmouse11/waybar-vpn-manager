@@ -103,14 +103,18 @@ def request_ip_update(connection_name: str):
 def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
     """Connect with killswitch interplay.
 
-    - Happ connect: refresh the server-IP whitelist; if the config asks for
-      auto killswitch ("happ" mode), make sure it is enabled.
-    - Other providers: suspend killswitch for the duration (their servers
-      are not whitelisted); it auto-resumes on the next Happ connect.
+    - Happ connect: refresh the Happ server-IP whitelist; enable when the
+      config asks for auto killswitch ("happ"/"all" mode).
+    - "all" mode + WireGuard/OpenVPN: resolve every configured endpoint
+      and rebuild the whitelist, keeping the killswitch on.
+    - otherwise: suspend an enabled killswitch for the duration.
     """
     ks_result = None
     if provider.name == "Happ":
         ks_result = killswitch.resume_for_happ()
+    elif killswitch.mode() == "all" and provider.name in ("WireGuard", "OpenVPN"):
+        ips, ifaces = _killswitch_all_targets()
+        ks_result = killswitch.enable(extra_ips=ips, ifaces=ifaces)
     elif killswitch.is_enabled():
         ks_result = killswitch.suspend_for(provider.name)
 
@@ -175,10 +179,49 @@ def manage_profiles(provider) -> ActionResult:
 #   level 2 — connections of the chosen provider + its import/manage actions
 
 
+def _killswitch_all_targets() -> tuple[list[str], list[str]]:
+    """'all' mode whitelist: IPv4 of every configured WireGuard/OpenVPN
+    endpoint + the tunnel interface names to allow through.
+
+    NetworkManager endpoints are not parsed (v1) — connecting one suspends
+    the killswitch instead. One broken provider must not stop the others
+    (pattern: _collect_ping_targets)."""
+    targets: list[tuple[str, str, int]] = []
+    ifaces: list[str] = []
+    for provider in ALL_PROVIDERS:
+        if provider.name not in ("WireGuard", "OpenVPN"):
+            continue
+        try:
+            pt = provider.ping_targets()
+        except Exception:
+            continue
+        targets += pt
+        if provider.name == "WireGuard":
+            # wg-quick names the interface after the profile, and the
+            # kernel caps interface names at 15 chars (IFNAMSIZ=16 with
+            # NUL) — longer names can never exist as wg interfaces (such
+            # profiles are unused or driven by NetworkManager, which has
+            # no such limit) and nft rejects the whole ruleset for them.
+            ifaces += [n for n, _, _ in pt if len(n) <= 15]
+            for n, _, _ in pt:
+                if len(n) > 15:
+                    logutil.log(f"killswitch: iface name too long, skipped: {n}")
+        elif pt:
+            ifaces.append("tun*")  # OpenVPN tunnel interfaces
+    return killswitch.resolve_endpoint_ips(targets), sorted(set(ifaces))
+
+
+def _killswitch_toggle(on: bool) -> ActionResult:
+    if not on:
+        return killswitch.set_mode(False)
+    ips, ifaces = _killswitch_all_targets()
+    return killswitch.set_mode(True, extra_ips=ips, ifaces=ifaces)
+
+
 def _killswitch_item() -> tuple[str, callable]:
-    if killswitch.is_enabled() or killswitch.mode() == "happ":
-        return ("  Killswitch: ON — click to disable", lambda: killswitch.set_mode(False))
-    return ("  Killswitch: OFF — click to enable (Happ)", lambda: killswitch.set_mode(True))
+    if killswitch.is_enabled() or killswitch.mode() in ("happ", "all"):
+        return ("  Killswitch: ON — click to disable", lambda: _killswitch_toggle(False))
+    return ("  Killswitch: OFF — click to enable (all)", lambda: _killswitch_toggle(True))
 
 
 def provider_actions(provider) -> list[tuple[str, callable]]:
@@ -377,8 +420,13 @@ def run_items(items: list[tuple[str, callable]], prompt: str) -> ActionResult:
     if not selected:
         return ActionResult(True, "")
 
-    action = next((fn for label, fn in items if label == selected), None)
+    # walker returns the selected line with surrounding whitespace trimmed
+    # (labels like "  Killswitch: …" keep their indent for display only),
+    # so match stripped-to-stripped — no two labels may differ only in
+    # surrounding whitespace.
+    action = next((fn for label, fn in items if label.strip() == selected), None)
     if action is None:
+        logutil.log(f"menu [{prompt}]: no action matches [{selected!r}]")
         return ActionResult(True, "")
 
     result: ActionResult = action()
@@ -401,7 +449,9 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
             capture_output=True,
             text=True,
         )
-        selected = result.stdout.strip()
+        # rstrip('\n') only: the trailing newline is walker's, the rest of
+        # the line is the user's selection.
+        selected = result.stdout.rstrip("\n")
         return selected if selected else None
     except FileNotFoundError:
         notify("Error", "walker not found", urgent=True)

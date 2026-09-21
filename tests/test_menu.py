@@ -286,6 +286,135 @@ def test_level1_active_count_label(monkeypatch):
     assert any("Killswitch" in o for o in level1_options)
 
 
+def test_killswitch_all_mode_arms_wg(monkeypatch, tmp_path):
+    """'all' mode: a WireGuard connect rebuilds the whitelist (endpoints +
+    tunnel ifaces) instead of suspending the killswitch."""
+    monkeypatch.setattr(vpn_manager.killswitch.config, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = vpn_manager.killswitch.config.load_config()
+    cfg.killswitch_mode = "all"
+    vpn_manager.killswitch.config.save_config(cfg)
+    monkeypatch.setattr(
+        vpn_manager, "_killswitch_all_targets", lambda: (["1.2.3.4"], ["nl", "tun*"])
+    )
+    calls = []
+    monkeypatch.setattr(
+        vpn_manager.killswitch,
+        "enable",
+        lambda **kw: calls.append(kw) or ActionResult(True, "on"),
+    )
+    wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    result = vpn_manager.guarded_connect(wg, wg.connections()[0])
+    assert result.success
+    assert wg.connected == ["nl"]
+    assert calls == [{"extra_ips": ["1.2.3.4"], "ifaces": ["nl", "tun*"]}]
+
+
+def test_guarded_connect_all_mode_suspends_for_nm(monkeypatch, tmp_path):
+    """NetworkManager has no endpoint parser (v1): the killswitch is
+    suspended for it even in 'all' mode."""
+    monkeypatch.setattr(vpn_manager.killswitch.config, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = vpn_manager.killswitch.config.load_config()
+    cfg.killswitch_mode = "all"
+    vpn_manager.killswitch.config.save_config(cfg)
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: True)
+    suspended = []
+    monkeypatch.setattr(
+        vpn_manager.killswitch,
+        "suspend_for",
+        lambda name: suspended.append(name) or ActionResult(True, "suspended"),
+    )
+    nm = FakeProvider(
+        "NetworkManager", [VPNConnection(name="office", provider="NetworkManager", active=False)]
+    )
+    result = vpn_manager.guarded_connect(nm, nm.connections()[0])
+    assert result.success
+    assert suspended == ["NetworkManager"]
+
+
+def test_guarded_connect_off_mode_suspends_when_enabled(monkeypatch, tmp_path):
+    """mode 'off' + killswitch on manually: other providers still suspend it."""
+    monkeypatch.setattr(vpn_manager.killswitch.config, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: True)
+    suspended = []
+    monkeypatch.setattr(
+        vpn_manager.killswitch,
+        "suspend_for",
+        lambda name: suspended.append(name) or ActionResult(True, "suspended"),
+    )
+    wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    result = vpn_manager.guarded_connect(wg, wg.connections()[0])
+    assert result.success
+    assert suspended == ["WireGuard"]
+
+
+def test_killswitch_all_targets_gathers_wg_and_ovpn_only(monkeypatch):
+    """Only WireGuard/OpenVPN endpoints feed the 'all' whitelist; wg profile
+    names become allowed interfaces, OpenVPN gets the tun* glob."""
+
+    class PtProvider(FakeProvider):
+        def __init__(self, name, targets):
+            super().__init__(name, [])
+            self._targets = targets
+
+        def ping_targets(self):
+            return self._targets
+
+    wg = PtProvider("WireGuard", [("nl", "93.184.216.34", 51820)])
+    # >15 chars: never a valid wg interface name (kernel IFNAMSIZ) — the
+    # iface is filtered out, but its endpoint IP still joins the whitelist
+    # (the config may be driven by NetworkManager, which has no such cap).
+    wg_long = PtProvider("WireGuard", [("ThinkPadNetherland", "93.184.216.37", 51820)])
+    ovpn = PtProvider("OpenVPN", [("de", "93.184.216.35", 1194)])
+    nm = PtProvider("NetworkManager", [("office", "93.184.216.36", 443)])
+    broken = PtProvider("WireGuard", [])
+    broken.ping_targets = lambda: (_ for _ in ()).throw(OSError("boom"))
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [wg, wg_long, ovpn, nm, broken])
+    monkeypatch.setattr(
+        vpn_manager.killswitch,
+        "resolve_endpoint_ips",
+        lambda targets: sorted(host for _, host, _ in targets),
+    )
+    ips, ifaces = vpn_manager._killswitch_all_targets()
+    assert ips == ["93.184.216.34", "93.184.216.35", "93.184.216.37"]  # NM endpoint excluded
+    assert ifaces == ["nl", "tun*"]  # wg profile name + OpenVPN glob; long name filtered
+
+
+def test_killswitch_item_toggle_gathers_targets(monkeypatch, tmp_path):
+    """The OFF item enables 'all' mode with the gathered whitelist."""
+    monkeypatch.setattr(vpn_manager.killswitch.config, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
+    monkeypatch.setattr(vpn_manager, "_killswitch_all_targets", lambda: (["1.2.3.4"], ["nl"]))
+    calls = []
+    monkeypatch.setattr(
+        vpn_manager.killswitch,
+        "set_mode",
+        lambda on, **kw: calls.append((on, kw)) or ActionResult(True, "ok"),
+    )
+    label, fn = vpn_manager._killswitch_item()
+    assert "OFF" in label and "(all)" in label
+    fn()
+    assert calls == [(True, {"extra_ips": ["1.2.3.4"], "ifaces": ["nl"]})]
+
+
+def test_run_items_matches_indented_labels(monkeypatch):
+    """walker returns the selected line trimmed (log proof: "no action
+    matches ['Killswitch: …']" without the leading spaces), so run_items
+    must compare labels stripped — the '  Killswitch: …' / '  Import …'
+    items otherwise can never be activated."""
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager, "walker_select", lambda options, prompt="VPN": options[0].strip()
+    )
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: seen.append(a))
+    result = vpn_manager.run_items(
+        [("  Killswitch: OFF — click to enable (all)", lambda: ActionResult(True, "on"))],
+        prompt="VPN",
+    )
+    assert result.success
+    assert seen == [("VPN", "on")]  # action ran and notified
+
+
 def test_unique_labels_suffix_cannot_collide_with_genuine_label():
     """A generated " (2)" disambiguator must not shadow a genuine later label."""
     items = [
