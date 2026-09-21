@@ -12,10 +12,13 @@ class FakeProvider:
         return self._conns
 
 
-def patch_env(monkeypatch, providers, cfg=None, traffic="↓ 1 MiB  ↑ 2 MiB"):
+def patch_env(monkeypatch, providers, cfg=None, traffic="↓ 1 MiB  ↑ 2 MiB",
+              rate="↓ 3 KiB/s ↑ 4 KiB/s"):
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", providers)
     monkeypatch.setattr(vpn_manager.config, "load_config", lambda: cfg or config.Config())
     monkeypatch.setattr(vpn_manager, "iface_traffic", lambda iface: traffic)
+    monkeypatch.setattr(vpn_manager, "iface_rate", lambda iface: rate)
+    monkeypatch.setattr(vpn_manager, "sample_iface_traffic", lambda iface: None)
     monkeypatch.setattr(vpn_manager, "request_ip_update", lambda name: None)
     monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda conn, age: "Exit: 9.9.9.9")
 
@@ -33,7 +36,8 @@ def test_single_active(monkeypatch):
     status = vpn_manager.get_status()
     assert status["text"] == " WireGuard: nl"
     assert status["class"] == ["vpn-connected", "vpn-wireguard"]
-    assert "↓ 1 MiB  ↑ 2 MiB" in status["tooltip"]
+    assert "↓ 3 KiB/s ↑ 4 KiB/s" in status["tooltip"]  # rate, units per second
+    assert "↓ 1 MiB  ↑ 2 MiB total" in status["tooltip"]  # totals, marked
     assert "Exit: 9.9.9.9" in status["tooltip"]
 
 

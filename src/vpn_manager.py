@@ -76,9 +76,14 @@ def get_status() -> dict:
         classes.append(f"vpn-{conn.provider.lower()}")
         line = f"{conn.provider}: {conn.name}"
         if conn.interface:
+            # rate first (units per second, like the menu), then totals —
+            # plain arrows on both rows confused "B/s" with "MiB"
+            rate = iface_rate(conn.interface)
             traffic = iface_traffic(conn.interface)
+            if rate:
+                line += f"\n  {rate}"
             if traffic:
-                line += f"\n  {traffic}"
+                line += f"\n  {traffic} total"
             sample_iface_traffic(conn.interface)  # next tick can show a rate
         tooltip.append(line)
 
@@ -297,7 +302,7 @@ def menu_loop() -> ActionResult:
 
     all_active = active_connections(providers=list(ALL_PROVIDERS))
     if all_active:
-        items.append(_current_connection_item(all_active[0]))
+        items.extend(_current_connection_items(all_active[0]))
     else:
         ip_row = _no_vpn_ip_item()
         if ip_row:
@@ -337,21 +342,42 @@ def menu_loop() -> ActionResult:
     return run_items(items, prompt="VPN")
 
 
-def _current_connection_item(conn: VPNConnection) -> tuple[str, callable]:
-    """First menu row: what is connected, live rate, exit IP. Selecting it
-    RECONNECTS the same server (drop + connect, with killswitch interplay)."""
-    label = f"↻ {conn.provider}: {conn.name}"
+def _current_connection_items(conn: VPNConnection) -> list[tuple[str, callable]]:
+    """First menu rows: what is connected + live metrics. Row 1 reconnects
+    the server; row 2 (metrics, indented) shows the full detail card.
+    dmenu rows are single-line, so the metrics get their own row instead
+    of being truncated by the walker window width."""
+    cfg = config.load_config()
+    metrics = []
     rate = iface_rate(conn.interface)
     if rate:
-        label += f"  {rate}"
-    cfg = config.load_config()
+        metrics.append(rate)
     if cfg.exit_ip_enabled:
         exit_line = ipinfo.status_line(conn.name, cfg.exit_ip_max_age)
         if exit_line:
-            label += f" · {exit_line.removeprefix('Exit: ')}"
+            metrics.append(exit_line.removeprefix("Exit: "))
         else:
             request_ip_update(conn.name)
-    return (label, lambda: _reconnect(conn))
+    rows = [(f"↻ {conn.provider}: {conn.name}", lambda: _reconnect(conn))]
+    if metrics:
+        rows.append((("     " + " · ".join(metrics)), lambda: _details(conn, cfg)))
+    return rows
+
+
+def _details(conn: VPNConnection, cfg) -> ActionResult:
+    lines = [f"{conn.provider}: {conn.name}"]
+    if conn.interface:
+        live = iface_rate(conn.interface)
+        totals = iface_traffic(conn.interface)
+        if live:
+            lines.append(live)
+        if totals:
+            lines.append(totals)
+    exit_line = ipinfo.status_line(conn.name, cfg.exit_ip_max_age)
+    if exit_line:
+        lines.append(exit_line)
+    notify("VPN — connection", "\n".join(lines))
+    return ActionResult(True, "")
 
 
 def _reconnect(conn: VPNConnection) -> ActionResult:

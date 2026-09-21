@@ -47,7 +47,7 @@ IFACES = {"ss": "keys-ss-tun0", "vless": "keys-vless-tun0"}  # ≤15 chars (kern
 LABELS = {"ss": "Shadowsocks", "vless": "VLESS"}
 STORE = Path.home() / ".config/vpn-manager/keys.json"
 KEEPER_STATE_DIR = Path.home() / ".local/state/vpn-manager"
-XRAY_TIMEOUT = 8  # seconds to wait for happd's start ack
+XRAY_TIMEOUT = 20  # seconds to wait for happd's start ack
 
 
 def _kind_meta(kind: str) -> tuple[str, str, Path]:
@@ -565,7 +565,7 @@ class KeysProvider(VPNProvider):
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        deadline = time.time() + 12
+        deadline = time.time() + 25  # happd can be slow to ack
         while time.time() < deadline:
             state = _read_keeper_state(state_path)
             if state:

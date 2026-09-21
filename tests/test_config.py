@@ -48,3 +48,16 @@ def test_show_empty_providers_roundtrip(tmp_path, monkeypatch):
     cfg.show_empty_providers = True
     save_config(cfg)
     assert load_config().show_empty_providers is True
+
+
+def test_happ_gui_fallback_roundtrip(tmp_path, monkeypatch):
+    from config import Config, load_config, save_config
+
+    p = tmp_path / "config.json"
+    monkeypatch.setattr(config, "CONFIG_PATH", p)
+    assert load_config().happ_gui_fallback is False  # default: no GUI window
+
+    cfg = Config()
+    cfg.happ_gui_fallback = True
+    save_config(cfg)
+    assert load_config().happ_gui_fallback is True

@@ -37,6 +37,7 @@ import sys
 import time
 from pathlib import Path
 
+import config
 import happmeta
 import logutil
 
@@ -424,6 +425,13 @@ class HappProvider(VPNProvider):
             )
         if not GUI_BIN.exists():
             return ActionResult(success=False, message=f"Happ not found at {GUI_BIN}")
+        if not config.load_config().happ_gui_fallback:
+            detail = f": {headless_error}" if headless_error else ""
+            return ActionResult(
+                success=False,
+                message=f"Headless connect failed{detail} "
+                '("happ_gui_fallback": true in the config launches the GUI instead)',
+            )
 
         subprocess.Popen(
             [str(GUI_BIN)],
@@ -463,7 +471,7 @@ class HappProvider(VPNProvider):
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        deadline = time.time() + 12
+        deadline = time.time() + 25  # happd can be slow to ack
         while time.time() < deadline:
             state = _read_keeper_state()
             if state:

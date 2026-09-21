@@ -445,7 +445,7 @@ def test_level1_layout_connected(monkeypatch):
     vpn_manager.run_menu()
     options = seen[0]
     assert options[0].startswith("↻ WireGuard: nl")
-    assert "↓ 2.0 MiB/s" in options[0] and "1.2.3.4" in options[0]
+    assert options[1] == "     ↓ 2.0 MiB/s ↑ 512.0 KiB/s · 1.2.3.4 🇩🇪"  # metrics row
     assert "Disconnect: WireGuard: nl" in options
     assert options[-1].strip().startswith("Killswitch")
 

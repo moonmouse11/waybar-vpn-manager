@@ -1,7 +1,7 @@
 # waybar-vpn-manager
 
 A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with support for
-**WireGuard, OpenVPN, Outline, Happ** and any VPN managed by **NetworkManager**.
+**WireGuard, OpenVPN, Shadowsocks (ss://), VLESS (vless://), Happ** and any VPN managed by **NetworkManager**.
 Built for Arch Linux with Hyprland / [Omarchy](https://omarchy.org/).
 
 Two-level walker menu (omarchy-style): pick a provider → pick a connection.
@@ -31,9 +31,22 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
 
 ## Requirements
 
-- Arch Linux, Waybar, Walker, Hyprland
-- `python` `wireguard-tools` `openvpn` `openresolv` (`nftables` for the killswitch)
-- Happ, Outline — optional, detected at runtime
+**Core (menu, status, WireGuard/OpenVPN):**
+
+- Arch Linux with Hyprland, [Omarchy](https://omarchy.org/) conventions
+- `python` (stdlib only, no pip packages)
+- `waybar` — status bar module (exec `vpn-status.sh` on a 3 s interval)
+- `walker` — dmenu picker for the menus
+- `wireguard-tools` (`wg-quick`), `openvpn`, `openresolv`
+- `iproute2` (`ip`, `ss`), `nftables` (killswitch), `sudo` (NOPASSWD rules from `install.sh`)
+- `libnotify` (`notify-send`), `curl`, `procps-ng` (`pgrep`/`pkill`)
+
+**Optional providers, detected at runtime:**
+
+- `Happ` (`/opt/happ`, `happd`) — Happ subscriptions **and** the shared xray-core
+  (`/opt/happ/bin/core/xray`) that headless-runs imported `ss://`/`vless://` keys
+- `networkmanager` (`nmcli`) — OpenConnect/IKEv2/L2TP/… via NM plugins
+- Keys providers (`Shadowsocks`, `VLESS`) need the Happ installation for the xray binary
 
 ## Install
 
