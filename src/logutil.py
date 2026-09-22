@@ -12,6 +12,10 @@ MAX_BYTES = 256 * 1024
 
 
 def log(message: str) -> None:
+    # message can carry data from an untrusted subscription provider (e.g. a
+    # server's "remarks" field) — collapse embedded newlines so it can't
+    # forge extra log lines with fake timestamps.
+    message = message.replace("\n", " ").replace("\r", " ")
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         if LOG_PATH.exists() and LOG_PATH.stat().st_size > MAX_BYTES:

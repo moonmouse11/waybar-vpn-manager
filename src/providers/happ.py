@@ -31,6 +31,7 @@ status always work headless via happd.
 import json
 import os
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -64,12 +65,24 @@ def _run(cmd: list[str]) -> tuple[int, str]:
     return result.returncode, output
 
 
+def _sock_is_trusted(path: Path) -> bool:
+    """/tmp is world-writable: another local user could pre-create a path
+    there before happd starts (or replace it after) and have our client
+    hand it whatever happd would normally see. Refuse anything that isn't
+    an actual socket owned by us or root."""
+    try:
+        st = path.lstat()  # lstat: a symlink to elsewhere must not be trusted either
+    except OSError:
+        return False
+    return stat.S_ISSOCK(st.st_mode) and st.st_uid in (0, os.getuid())
+
+
 def _daemon_request(action: str, **params) -> dict | None:
     """Send one framed JSON request to happd and return its response.
 
     Returns None if the daemon is unreachable or times out.
     """
-    if not HAPPD_SOCK.exists():
+    if not _sock_is_trusted(HAPPD_SOCK):
         return None
 
     try:
@@ -252,6 +265,8 @@ def _write_own_keeper_state(state: dict) -> None:
 
 
 def _open_session() -> socket.socket:
+    if not _sock_is_trusted(HAPPD_SOCK):
+        raise OSError(f"refusing to use untrusted socket at {HAPPD_SOCK}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(SOCKET_TIMEOUT)
     sock.connect(str(HAPPD_SOCK))

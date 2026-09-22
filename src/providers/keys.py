@@ -51,6 +51,8 @@ XRAY_TIMEOUT = 20  # seconds to wait for happd's start ack
 
 def _kind_meta(kind: str) -> tuple[str, str, Path]:
     """(happd process-id, tun interface, keeper state path) for a kind."""
+    if kind not in IFACES:  # explicit gate — kind reaches here from CLI args
+        raise ValueError(f"unknown key kind: {kind!r}")
     return (
         f"xray-keys-{kind}",
         IFACES[kind],

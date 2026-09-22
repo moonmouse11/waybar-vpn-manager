@@ -105,7 +105,12 @@ def _parse_providers() -> dict[str, dict]:
     # id from the url; a later real id line for the same url always wins.
     for m in re.finditer(r"Subscription being added: (\S+)", text):
         added_urls.append((m.start(), m.group(1)))
-    for m in re.finditer(r"\](?: ?\[[^\]]+\])* ?(.+?) fetching subscription from (\S+)", text):
+    # Atomic group around the repeated "[...]" prefix: once it has consumed
+    # N bracket groups it commits to that count instead of retrying N-1,
+    # N-2, ... against the trailing ".+?" when "fetching subscription from"
+    # isn't found — that retry was O(n^2)-ish backtracking on a log file
+    # that only grows, so a big log could stall the 3 s --status tick.
+    for m in re.finditer(r"\](?>(?: ?\[[^\]]+\])*) ?(.+?) fetching subscription from (\S+)", text):
         name = m.group(1).strip()
         if name:
             url_name[m.group(2)] = name
@@ -226,7 +231,12 @@ def _headers() -> dict[str, str] | None:
 
 
 def _sub_cache_path(sub_id: str) -> Path:
-    return SUB_CACHE_DIR / f"subscription-{sub_id}.json"
+    # sub_id is usually a log-derived digit string or a sha1 hash (both
+    # already safe), but a routing.json "subscriptionId" fallback is not
+    # validated on the way in — strip anything but word chars/hyphen so a
+    # crafted id (e.g. containing "../") can't escape SUB_CACHE_DIR.
+    safe_id = re.sub(r"[^\w-]", "_", sub_id)
+    return SUB_CACHE_DIR / f"subscription-{safe_id}.json"
 
 
 def fetch_subscription(sub_id: str, url: str) -> list[dict]:

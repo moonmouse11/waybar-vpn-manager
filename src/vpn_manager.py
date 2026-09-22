@@ -690,7 +690,10 @@ def notify(title: str, message: str, urgent: bool = False):
     cmd = ["notify-send"]
     if urgent:
         cmd += ["-u", "critical"]
-    cmd += [title, message]
+    # "--" stops option parsing: title/message can come from a VPN daemon's
+    # own error text or a subscription provider's server name, and either
+    # could start with "-" and otherwise be read as a notify-send flag.
+    cmd += ["--", title, message]
     subprocess.run(cmd, capture_output=True)
 
 
@@ -735,6 +738,9 @@ def main():
         help="Refresh Happ subscription caches in the background (internal)",
     )
     args = parser.parse_args()
+    if args.keys_keeper is not None and args.keys_keeper[0] not in ("ss", "vless"):
+        kind = args.keys_keeper[0]
+        parser.error(f"argument --keys-keeper: invalid KIND {kind!r} (choose from 'ss', 'vless')")
 
     if args.status:
         print(json.dumps(get_status()))
