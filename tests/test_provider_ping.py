@@ -62,10 +62,81 @@ def test_wg_provider_ping_targets(tmp_path, monkeypatch):
     good.write_text("[Peer]\nEndpoint = vpn.example.com:51820\n")
     bad = tmp_path / "noendpoint.conf"
     bad.write_text("[Peer]\nPublicKey = k\n")
-    monkeypatch.setattr(wireguard, "WG_DIR", tmp_path)
-    monkeypatch.setattr(wireguard, "_active_interfaces", lambda: [])  # no real `ip`
-    targets = WireGuardProvider().ping_targets()
+    monkeypatch.setattr(wireguard, "_active_interfaces", lambda *_: [])  # no real `ip`
+    provider = WireGuardProvider()
+    # config_dir is a class attribute bound at class-definition time, not a
+    # live read of the module-level WG_DIR — patching wireguard.WG_DIR alone
+    # has no effect on it, so the instance attribute must be overridden.
+    provider.config_dir = tmp_path
+    provider.other_config_dirs = ()
+    targets = provider.ping_targets()
     assert targets == [("good", "vpn.example.com", 51820)]
+
+
+def test_amneziawg_lists_its_own_dir_independently(tmp_path, monkeypatch):
+    """WireGuard and AmneziaWG each list configs strictly from their own
+    config_dir — a same-named profile in the other dir is a distinct file
+    and must not hide either one (covers the real collision this machine
+    has: /etc/wireguard/amneziawg.conf alongside /etc/amnezia/amneziawg/)."""
+    from providers import wireguard
+    from providers.wireguard import AmneziaWGProvider, WireGuardProvider
+
+    wg_dir = tmp_path / "wireguard"
+    awg_dir = tmp_path / "amneziawg"
+    wg_dir.mkdir()
+    awg_dir.mkdir()
+    (wg_dir / "amneziawg.conf").write_text("[Peer]\nEndpoint = 1.2.3.4:51820\n")
+    (wg_dir / "plain.conf").write_text("[Peer]\nEndpoint = 5.6.7.8:51820\n")
+    (awg_dir / "amneziawg.conf").write_text("[Peer]\nEndpoint = 1.2.3.4:51821\nJc = 4\n")
+
+    monkeypatch.setattr(wireguard, "_active_interfaces", lambda *_: [])
+
+    wg = WireGuardProvider()
+    wg.config_dir = wg_dir
+    wg.other_config_dirs = (awg_dir,)
+    awg = AmneziaWGProvider()
+    awg.config_dir = awg_dir
+    awg.other_config_dirs = (wg_dir,)
+
+    assert {c.name for c in wg.connections()} == {"amneziawg", "plain"}
+    assert {c.name for c in awg.connections()} == {"amneziawg"}
+
+
+def test_orphan_active_iface_excluded_if_claimed_by_other_provider(tmp_path, monkeypatch):
+    """An active `type wireguard` interface with no matching WireGuard
+    config file, but a matching profile under AmneziaWG's dir (kernel
+    link-type overlap misattributing it), must not appear as a phantom
+    WireGuard connection."""
+    from providers import wireguard
+    from providers.wireguard import WireGuardProvider
+
+    wg_dir = tmp_path / "wireguard"
+    awg_dir = tmp_path / "amneziawg"
+    wg_dir.mkdir()
+    awg_dir.mkdir()
+    (awg_dir / "foo.conf").write_text("[Peer]\nEndpoint = 1.2.3.4:51820\nJc = 4\n")
+
+    monkeypatch.setattr(wireguard, "_active_interfaces", lambda *_: ["foo"])
+
+    wg = WireGuardProvider()
+    wg.config_dir = wg_dir
+    wg.other_config_dirs = (awg_dir,)
+    assert wg.connections() == []
+
+    wg.other_config_dirs = ()  # unclaimed elsewhere: falls back to the orphan listing
+    conns = wg.connections()
+    assert len(conns) == 1
+    assert conns[0].name == "foo" and conns[0].active
+
+
+def test_amneziawg_uses_awg_quick(monkeypatch):
+    from providers.wireguard import AmneziaWGProvider
+
+    provider = AmneziaWGProvider()
+    assert provider.name == "AmneziaWG"
+    assert provider.quick_bin == "awg-quick"
+    assert provider.systemd_prefix == "awg-quick"
+    assert provider.link_type == "amneziawg"
 
 
 # ── ovpn_endpoint ─────────────────────────────────────────────────────────────

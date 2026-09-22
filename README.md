@@ -1,7 +1,7 @@
 # waybar-vpn-manager
 
 A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with support for
-**WireGuard, OpenVPN, Shadowsocks (ss://), VLESS (vless://), Happ** and any VPN managed by **NetworkManager**.
+**WireGuard, AmneziaWG, OpenVPN, Shadowsocks (ss://), VLESS (vless://), Happ** and any VPN managed by **NetworkManager**.
 Built for Arch Linux with Hyprland / [Omarchy](https://omarchy.org/).
 
 Two-level walker menu (omarchy-style): pick a provider → pick a connection.
@@ -47,6 +47,9 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
   (`/opt/happ/bin/core/xray`) that headless-runs imported `ss://`/`vless://` keys
 - `networkmanager` (`nmcli`) — OpenConnect/IKEv2/L2TP/… via NM plugins
 - Keys providers (`Shadowsocks`, `VLESS`) need the Happ installation for the xray binary
+- `AmneziaWG` (`amneziawg-tools` + `amneziawg-dkms`, not installed by `make install` —
+  dkms needs matching `linux-headers`) — obfuscated WireGuard via `awg-quick`,
+  configs under `/etc/amnezia/amneziawg/`
 
 ## Install
 

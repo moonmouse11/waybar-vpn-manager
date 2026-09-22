@@ -141,6 +141,7 @@ def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
         ks_result = killswitch.resume_for_happ(extra_ips=ips)
     elif killswitch.mode() == "all" and provider.name in (
         "WireGuard",
+        "AmneziaWG",
         "OpenVPN",
         "VLESS",
         "Shadowsocks",
@@ -242,10 +243,10 @@ def _killswitch_all_targets() -> tuple[list[str], list[str]]:
         except Exception:
             continue
         targets += pt
-        if provider.name == "WireGuard":
-            # wg-quick names the interface after the profile, and the
-            # kernel caps interface names at 15 chars (IFNAMSIZ=16 with
-            # NUL) — longer names can never exist as wg interfaces (such
+        if provider.name in ("WireGuard", "AmneziaWG"):
+            # wg-quick/awg-quick name the interface after the profile, and
+            # the kernel caps interface names at 15 chars (IFNAMSIZ=16 with
+            # NUL) — longer names can never exist as wg/awg interfaces (such
             # profiles are unused or driven by NetworkManager, which has
             # no such limit) and nft rejects the whole ruleset for them.
             ifaces += [n for n, _, _ in pt if len(n) <= 15]
@@ -275,10 +276,16 @@ def _killswitch_item() -> tuple[str, callable]:
 
 def provider_actions(provider) -> list[tuple[str, callable]]:
     """Import / manage entries for providers that support them."""
-    if provider.name == "WireGuard":
+    if provider.name in ("WireGuard", "AmneziaWG"):
         return [
-            ("  Import WireGuard config...", lambda: import_config_file(provider, "WireGuard")),
-            ("  Manage WireGuard profiles...", lambda: manage_profiles(provider)),
+            (
+                f"  Import {provider.name} config...",
+                lambda: import_config_file(provider, provider.name),
+            ),
+            (
+                f"  Manage {provider.name} profiles...",
+                lambda: manage_profiles(provider),
+            ),
         ]
     if provider.name == "OpenVPN":
         return [("  Import OpenVPN config...", lambda: import_config_file(provider, "OpenVPN"))]
@@ -488,7 +495,6 @@ def _refresh_subscriptions() -> ActionResult:
         start_new_session=True,
     )
     notify("Happ", "Subscription refresh started — reopen the menu in a few seconds")
-    return ActionResult(True, "")
     return ActionResult(True, "")
 
 

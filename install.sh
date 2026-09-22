@@ -18,11 +18,12 @@ sudo pacman -S --needed --noconfirm python wireguard-tools openvpn openresolv so
 SUDOERS_FILE="/etc/sudoers.d/vpn-manager"
 # Managed by this installer: rewrite on every run so upgrades pick up new rules.
 # Rules are narrowed to the exact call patterns used by the providers:
-#   wg-quick up/down <profile>, openvpn --config/--daemon/--writepid,
-#   mkdir/rm/cp/chmod only under /run/openvpn, /etc/wireguard, /etc/openvpn/client,
+#   wg-quick/awg-quick up/down <profile>, openvpn --config/--daemon/--writepid,
+#   mkdir/rm/cp/chmod only under /run/openvpn, /etc/wireguard,
+#   /etc/amnezia/amneziawg, /etc/openvpn/client,
 #   cat on the same config globs (menu-imported configs are root:0600 — the
 #   background ping sweep reads endpoints via 'sudo -n cat'),
-#   systemctl enable/disable wg-quick@*, happ-killswitch (root-owned script).
+#   systemctl enable/disable wg-quick@* / awg-quick@*, happ-killswitch (root-owned script).
 # `kill <pid>` stays broad (arbitrary numeric PIDs cannot be pattern-matched).
 # THREAT MODEL: sudoers matches command arguments lexically and `*` spans
 # `/` and `..`, so `sudo -n cat /etc/wireguard/../../../etc/shadow` matches
@@ -36,7 +37,7 @@ SUDOERS_FILE="/etc/sudoers.d/vpn-manager"
 # If a narrowed rule ever blocks a legit call, fall back to the broad form:
 #   ... NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn, /usr/bin/kill, /usr/bin/mkdir, /usr/bin/rm, /usr/bin/cp, /usr/bin/chmod, ...
 echo "==> Writing sudoers rule..."
-echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn --config * --daemon --writepid /run/openvpn/client-*.pid, /usr/bin/kill, /usr/bin/mkdir -p /run/openvpn, /usr/bin/rm -f /run/openvpn/client-*.pid, /usr/bin/rm -f /etc/wireguard/*.conf, /usr/bin/cp * /etc/wireguard/*, /usr/bin/cp * /etc/openvpn/client/*, /usr/bin/chmod 600 /etc/wireguard/*, /usr/bin/chmod 600 /etc/openvpn/client/*, /usr/bin/cat /etc/wireguard/*, /usr/bin/cat /etc/openvpn/client/*, /usr/bin/systemctl enable wg-quick@*, /usr/bin/systemctl disable wg-quick@*, /usr/local/bin/happ-killswitch" \
+echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/awg-quick, /usr/bin/openvpn --config * --daemon --writepid /run/openvpn/client-*.pid, /usr/bin/kill, /usr/bin/mkdir -p /run/openvpn, /usr/bin/rm -f /run/openvpn/client-*.pid, /usr/bin/rm -f /etc/wireguard/*.conf, /usr/bin/rm -f /etc/amnezia/amneziawg/*.conf, /usr/bin/cp * /etc/wireguard/*, /usr/bin/cp * /etc/amnezia/amneziawg/*, /usr/bin/cp * /etc/openvpn/client/*, /usr/bin/chmod 600 /etc/wireguard/*, /usr/bin/chmod 600 /etc/amnezia/amneziawg/*, /usr/bin/chmod 600 /etc/openvpn/client/*, /usr/bin/cat /etc/wireguard/*, /usr/bin/cat /etc/amnezia/amneziawg/*, /usr/bin/cat /etc/openvpn/client/*, /usr/bin/systemctl enable wg-quick@*, /usr/bin/systemctl disable wg-quick@*, /usr/bin/systemctl enable awg-quick@*, /usr/bin/systemctl disable awg-quick@*, /usr/local/bin/happ-killswitch" \
     | sudo tee "$SUDOERS_FILE" > /dev/null
 sudo chmod 440 "$SUDOERS_FILE"
 sudo visudo -cf "$SUDOERS_FILE" > /dev/null && echo "==> sudoers rule validated"
@@ -55,6 +56,15 @@ rm -f "$HOME/.local/bin/happ-killswitch"
 echo "==> Setting /etc/wireguard directory permissions..."
 sudo mkdir -p /etc/wireguard
 sudo chmod o+rx /etc/wireguard
+
+# ── /etc/amnezia/amneziawg permissions (AmneziaWG, optional) ─────────────────
+# Only wires up permissions; amneziawg-tools/amneziawg-dkms are not pulled in
+# here (dkms needs matching linux-headers per kernel) — install them yourself
+# if you use AmneziaWG, the provider is a no-op without awg-quick.
+
+echo "==> Setting /etc/amnezia/amneziawg directory permissions..."
+sudo mkdir -p /etc/amnezia/amneziawg
+sudo chmod o+rx /etc/amnezia/amneziawg
 
 # ── /etc/openvpn/client directory ─────────────────────────────────────────────
 
