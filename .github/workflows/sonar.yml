@@ -12,7 +12,9 @@ permissions:
 jobs:
   sonar:
 
-    runs-on: ubuntu-latest
+    # Pinned, not "ubuntu-latest": GitHub is migrating that label from
+    # 24.04 to 26.04 starting 2026-10-19.
+    runs-on: ubuntu-24.04
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -31,15 +33,14 @@ jobs:
       run: pip install -e ".[dev]"
 
     - name: Run tests with coverage
+      # coverage.py writes <source>.../src</source> plus filenames relative
+      # to it (e.g. "config.py") — sonar-python's Cobertura sensor resolves
+      # filenames against that <source> tag itself, so this needs no path
+      # rewrite (unlike a Clover/PHP report, which has no <source> and is
+      # matched against the project root instead — a prior "fix" here
+      # applied that rewrite anyway, which made every path unresolvable
+      # and silently zeroed out coverage on SonarCloud).
       run: pytest --cov=src --cov-report=xml
-
-    - name: Normalize coverage paths
-      # coverage.py writes <source>.../src</source> with filenames relative
-      # to it (e.g. "config.py"); the Sonar scanner indexes files relative
-      # to the project root ("src/config.py") — same class of mismatch as
-      # the PHP Clover report in php-befunge, fixed the same way: rewrite
-      # the paths before the scan instead of relying on <source> resolution.
-      run: sed -i 's|filename="|filename="src/|g' coverage.xml
 
     - name: Run SonarQube analysis
       uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2

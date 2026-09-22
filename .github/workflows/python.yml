@@ -12,7 +12,10 @@ permissions:
 jobs:
   tests:
 
-    runs-on: ubuntu-latest
+    # Pinned, not "ubuntu-latest": GitHub is migrating that label from
+    # 24.04 to 26.04 starting 2026-10-19, and the matrix already covers
+    # the Python version spread — no need to also float the OS under it.
+    runs-on: ubuntu-24.04
 
     strategy:
       matrix:
