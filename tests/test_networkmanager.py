@@ -15,6 +15,7 @@ def test_connections_parsing(monkeypatch):
             return 0, active
         return 0, saved
 
+    monkeypatch.setattr(nm.shutil, "which", lambda _: "/usr/bin/nmcli")
     monkeypatch.setattr(nm, "_run", fake_run)
     conns = nm.NetworkManagerProvider().connections()
 

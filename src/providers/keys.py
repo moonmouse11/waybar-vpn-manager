@@ -22,7 +22,6 @@ import hashlib
 import json
 import os
 import re
-import socket
 import subprocess
 import sys
 import time
@@ -73,7 +72,9 @@ METHODS = {
 }
 
 _KEY_RE = re.compile(r"(?:ss|vless)://[^\s'\"]+")
-_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 # ── key parsing ───────────────────────────────────────────────────────────────
@@ -126,7 +127,7 @@ def _legacy_json(text: str) -> dict:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
-        raise ValueError(f"cannot decode legacy key JSON: {e}")
+        raise ValueError(f"cannot decode legacy key JSON: {e}") from e
     if not isinstance(data, dict):
         raise ValueError("legacy key is not a JSON object")
     return data
@@ -160,7 +161,7 @@ def parse_ss_key(url: str) -> dict:
         try:
             decoded = _loose_b64(userinfo_b64).decode("utf-8", errors="replace")
         except (binascii.Error, ValueError) as e:
-            raise ValueError(f"cannot decode key credentials: {e}")
+            raise ValueError(f"cannot decode key credentials: {e}") from e
         if decoded.lstrip().startswith("{"):
             # legacy with explicit host: ss://base64(json)@host:port
             legacy = _legacy_json(decoded)
@@ -182,7 +183,7 @@ def parse_ss_key(url: str) -> dict:
         try:
             raw = _loose_b64(rest).decode("utf-8", errors="replace")
         except (binascii.Error, ValueError) as e:
-            raise ValueError(f"cannot decode legacy key JSON: {e}")
+            raise ValueError(f"cannot decode legacy key JSON: {e}") from e
         legacy = _legacy_json(raw)
         method = str(legacy.get("method") or "")
         password = str(legacy.get("password") or "")
@@ -194,7 +195,8 @@ def parse_ss_key(url: str) -> dict:
 
     method = method.lower().strip()
     if method not in METHODS:
-        raise ValueError(f"unsupported method {method!r} (xray supports: {', '.join(sorted(METHODS))})")
+        supported = ", ".join(sorted(METHODS))
+        raise ValueError(f"unsupported method {method!r} (xray supports: {supported})")
     if not password:
         raise ValueError("empty password in key")
 
@@ -348,7 +350,10 @@ def _vless_outbound(server: dict) -> dict:
     user = {"id": server["id"], "encryption": "none"}
     if server.get("flow"):
         user["flow"] = server["flow"]
-    stream: dict = {"network": server.get("network") or "tcp", "security": server.get("security") or "none"}
+    stream: dict = {
+        "network": server.get("network") or "tcp",
+        "security": server.get("security") or "none",
+    }
     security = stream["security"]
     if security == "reality":
         reality = {
@@ -384,7 +389,9 @@ def _vless_outbound(server: dict) -> dict:
         stream["tcpSettings"] = {"header": {"type": server["headerType"]}}
     return {
         "protocol": "vless",
-        "settings": {"vnext": [{"address": server["host"], "port": server["port"], "users": [user]}]},
+        "settings": {
+            "vnext": [{"address": server["host"], "port": server["port"], "users": [user]}]
+        },
         "streamSettings": stream,
         "tag": "proxy",
     }

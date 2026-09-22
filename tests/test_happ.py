@@ -213,7 +213,7 @@ def test_keeper_aborts_rearm_when_ownership_lost(tmp_path, monkeypatch):
         socks.append(sock)
         return sock
 
-    writes = _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg)
+    _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg)
 
     def seize_ownership(seconds):
         # simulate a newer keeper claiming the state file mid-sleep

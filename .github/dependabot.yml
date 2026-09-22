@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Actions are pinned to full commit SHAs, so they never move on their
+  # own; Dependabot keeps the pins fresh and updates the version comments.
+  # The CI workflows run on every such PR, so updates are gated by checks.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  # Dev tooling (pytest/ruff/pytest-cov) — the plugin itself has no
+  # runtime dependencies (stdlib only).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5

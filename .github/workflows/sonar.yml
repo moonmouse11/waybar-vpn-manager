@@ -1,0 +1,49 @@
+name: SonarQube
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  sonar:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      with:
+        # Full history enables blame information and new-code detection.
+        fetch-depth: 0
+
+    - name: Setup Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      with:
+        python-version: "3.13"
+        cache: pip
+        cache-dependency-path: pyproject.toml
+
+    - name: Install dependencies
+      run: pip install -e ".[dev]"
+
+    - name: Run tests with coverage
+      run: pytest --cov=src --cov-report=xml
+
+    - name: Normalize coverage paths
+      # coverage.py writes <source>.../src</source> with filenames relative
+      # to it (e.g. "config.py"); the Sonar scanner indexes files relative
+      # to the project root ("src/config.py") — same class of mismatch as
+      # the PHP Clover report in php-befunge, fixed the same way: rewrite
+      # the paths before the scan instead of relying on <source> resolution.
+      run: sed -i 's|filename="|filename="src/|g' coverage.xml
+
+    - name: Run SonarQube analysis
+      uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        # Not a secret: the public SonarCloud endpoint.
+        SONAR_HOST_URL: https://sonarcloud.io

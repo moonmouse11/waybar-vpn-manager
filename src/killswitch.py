@@ -75,7 +75,9 @@ def redetect() -> ActionResult:
 # ── Mode-aware helpers used by the menu / connect guard ──────────────────────
 
 
-def set_mode(on: bool, extra_ips: list[str] | None = None, ifaces: list[str] | None = None) -> ActionResult:
+def set_mode(
+    on: bool, extra_ips: list[str] | None = None, ifaces: list[str] | None = None
+) -> ActionResult:
     """Menu toggle: persist the preference ("all" when on) and apply it."""
     cfg = config.load_config()
     cfg.killswitch_mode = "all" if on else "off"
@@ -144,7 +146,7 @@ def _sudo(*args: str) -> ActionResult:
     logutil.log(f"killswitch: {' '.join(args)} -> rc={result.returncode}: {output[:200]}")
     # error context can sit above the last line — nft prints the offending
     # rule, then a caret-only line ("    ^^^^"); keep the last meaningful one
-    meaningful = [l for l in output.splitlines() if l.strip(" ^\t")]
+    meaningful = [line for line in output.splitlines() if line.strip(" ^\t")]
     if result.returncode != 0:
         hint = " — run: make install" if "password" in output.lower() else ""
         reason = meaningful[-1] if meaningful else "no output"

@@ -4,14 +4,13 @@ ping cache writer, and provider_menu labels."""
 import json
 import time
 
+from test_menu import FakeProvider, patch_menu_env
+
 import happmeta
 import vpn_manager
 from providers.base import VPNConnection
 from providers.openvpn import ovpn_endpoint
 from providers.wireguard import wg_endpoint
-
-from test_menu import FakeProvider, patch_menu_env
-
 
 # ── wg_endpoint ───────────────────────────────────────────────────────────────
 
@@ -303,7 +302,8 @@ def test_collect_ping_targets_skips_broken_provider(monkeypatch):
     broken.ping_targets = _raise
     ok = FakeProvider("Ok", [])
     ok.ping_targets = lambda: [("ok-conn", "o.example.com", 443)]
-    monkeypatch.setattr(vpn_manager.happmeta, "ping_targets", lambda: [("happ", "h.example.com", 443)])
+    happ_targets = [("happ", "h.example.com", 443)]
+    monkeypatch.setattr(vpn_manager.happmeta, "ping_targets", lambda: happ_targets)
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [broken, ok])
     targets = vpn_manager._collect_ping_targets()
     assert ("happ", "h.example.com", 443) in targets

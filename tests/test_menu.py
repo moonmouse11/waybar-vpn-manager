@@ -30,6 +30,11 @@ def patch_menu_env(monkeypatch, providers, picks):
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
     monkeypatch.setattr(vpn_manager, "request_ip_update", lambda name: None)
+    # real values only where a test overrides these after calling us (e.g. the
+    # metrics-row test below) — real `ip` may be absent (containerized CI)
+    monkeypatch.setattr(vpn_manager, "iface_rate", lambda iface: None)
+    monkeypatch.setattr(vpn_manager, "iface_traffic", lambda iface: None)
+    monkeypatch.setattr(vpn_manager, "sample_iface_traffic", lambda iface: None)
     iterator = iter(picks)
     monkeypatch.setattr(
         vpn_manager, "walker_select", lambda options, prompt="VPN": next(iterator, None)
@@ -91,7 +96,9 @@ def test_happ_provider_menu_disambiguates_duplicate_labels(monkeypatch):
         "VPNConnection",
         lambda **kw: (made.append(SimpleNamespace(**kw)) or made[-1]),
     )
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [provider])
     monkeypatch.setattr(vpn_manager.happmeta, "server_info_suffix", lambda name: "")
+    monkeypatch.setattr(vpn_manager.happmeta, "server_params", lambda name, allow_fetch=False: None)
     monkeypatch.setattr(vpn_manager.killswitch, "resume_for_happ", lambda extra_ips=None: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
@@ -303,6 +310,7 @@ def test_killswitch_all_mode_arms_wg(monkeypatch, tmp_path):
         lambda **kw: calls.append(kw) or ActionResult(True, "on"),
     )
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [wg])
     result = vpn_manager.guarded_connect(wg, wg.connections()[0])
     assert result.success
     assert wg.connected == ["nl"]
@@ -326,6 +334,7 @@ def test_guarded_connect_all_mode_suspends_for_nm(monkeypatch, tmp_path):
     nm = FakeProvider(
         "NetworkManager", [VPNConnection(name="office", provider="NetworkManager", active=False)]
     )
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [nm])
     result = vpn_manager.guarded_connect(nm, nm.connections()[0])
     assert result.success
     assert suspended == ["NetworkManager"]
@@ -342,6 +351,7 @@ def test_guarded_connect_off_mode_suspends_when_enabled(monkeypatch, tmp_path):
         lambda name: suspended.append(name) or ActionResult(True, "suspended"),
     )
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [wg])
     result = vpn_manager.guarded_connect(wg, wg.connections()[0])
     assert result.success
     assert suspended == ["WireGuard"]
@@ -697,18 +707,22 @@ def test_happ_provider_menu_shows_traffic_info(monkeypatch):
         "title": "oplVPN_bot",
     }
     seen, notifications = [], []
-    provider = _happ_provider_menu_env(monkeypatch, entries, info, seen, notifications, picks=[None])
+    provider = _happ_provider_menu_env(
+        monkeypatch, entries, info, seen, notifications, picks=[None]
+    )
 
     vpn_manager.happ_provider_menu(provider, "P", entries)
     assert seen[0] == ["ⓘ Трафик 1838 GB / ∞ · до 14.12.2026", "Connect s1", "‹ Back"]
 
     # picking the ⓘ entry notifies with the full card, connects nothing
+    info_label = "ⓘ Трафик 1838 GB / ∞ · до 14.12.2026"
     seen2, notifications2 = [], []
     provider2 = _happ_provider_menu_env(
-        monkeypatch, entries, info, seen2, notifications2, picks=["ⓘ Трафик 1838 GB / ∞ · до 14.12.2026"]
+        monkeypatch, entries, info, seen2, notifications2, picks=[info_label]
     )
     vpn_manager.happ_provider_menu(provider2, "P", entries)
-    assert notifications2 == [(("Happ · P", "oplVPN_bot\n↓ 1838 GB · ↑ 0 GB / ∞\nДействует до 14.12.2026"), {})]
+    card = "oplVPN_bot\n↓ 1838 GB · ↑ 0 GB / ∞\nДействует до 14.12.2026"
+    assert notifications2 == [(("Happ · P", card), {})]
 
 
 def test_happ_provider_menu_omits_missing_info_parts(monkeypatch):
@@ -716,7 +730,9 @@ def test_happ_provider_menu_omits_missing_info_parts(monkeypatch):
     entries = [{"name": "s1", "active": False, "provider_id": "42"}]
     info = {"upload": None, "download": None, "total": 0, "expire": None, "title": None}
     seen, notifications = [], []
-    provider = _happ_provider_menu_env(monkeypatch, entries, info, seen, notifications, picks=[None])
+    provider = _happ_provider_menu_env(
+        monkeypatch, entries, info, seen, notifications, picks=[None]
+    )
     vpn_manager.happ_provider_menu(provider, "P", entries)
     assert seen[0] == ["Connect s1", "‹ Back"]  # nothing worth showing -> no ⓘ
 
@@ -726,6 +742,8 @@ def test_happ_provider_menu_no_info_entry_without_record(monkeypatch):
     plain server list."""
     entries = [{"name": "s1", "active": False, "provider_id": ""}]
     seen, notifications = [], []
-    provider = _happ_provider_menu_env(monkeypatch, entries, None, seen, notifications, picks=[None])
+    provider = _happ_provider_menu_env(
+        monkeypatch, entries, None, seen, notifications, picks=[None]
+    )
     vpn_manager.happ_provider_menu(provider, "P", entries)
     assert seen[0] == ["Connect s1", "‹ Back"]

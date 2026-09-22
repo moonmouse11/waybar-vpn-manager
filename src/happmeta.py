@@ -12,6 +12,7 @@ on the network.
 """
 
 import base64
+import contextlib
 import copy
 import hashlib
 import json
@@ -127,7 +128,7 @@ def _parse_providers() -> dict[str, dict]:
         ra = re.sub(r"^https?://[^/]+", "", a)
         rb = re.sub(r"^https?://[^/]+", "", b)
         n = 0
-        for ca, cb in zip(ra, rb):
+        for ca, cb in zip(ra, rb, strict=False):
             if ca != cb:
                 break
             n += 1
@@ -262,10 +263,13 @@ def fetch_subscription(sub_id: str, url: str) -> list[dict]:
                 record = {"at": time.time(), "url": url, "servers": servers}
                 if info is not None:
                     record["info"] = info
-                elif isinstance(cached, dict) and cached.get("url") == url:
+                elif (
+                    isinstance(cached, dict)
+                    and cached.get("url") == url
+                    and isinstance(cached.get("info"), dict)
+                ):
                     # panel answered without headers — keep the previous info
-                    if isinstance(cached.get("info"), dict):
-                        record["info"] = cached["info"]
+                    record["info"] = cached["info"]
                 try:
                     SUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                     cache_path.write_text(
@@ -298,10 +302,8 @@ def _parse_sub_info(resp) -> dict | None:
         for part in raw.split(";"):
             key, _, val = part.strip().partition("=")
             if key in ("upload", "download", "total", "expire"):
-                try:
-                    info[key] = int(val)
-                except ValueError:
-                    pass  # tolerate malformed values, keep None
+                with contextlib.suppress(ValueError):
+                    info[key] = int(val)  # tolerate malformed values, keep None
     title = headers.get("Profile-Title")
     if title:
         title = title.strip()
@@ -405,15 +407,13 @@ def request_subscription_update() -> None:
         return
     for sub_id, prov in providers().items():
         if prov.get("url") and not _sub_cache_fresh(sub_id, prov["url"]):
-            try:
+            with contextlib.suppress(OSError):  # a spawn failure must never break --status
                 subprocess.Popen(
                     [sys.executable, str(MANAGER), "--update-subs"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
-            except OSError:
-                pass  # a spawn failure must never break --status
             return
 
 
@@ -424,10 +424,8 @@ def update_subscriptions() -> None:
     for sub_id, prov in providers().items():
         url = prov.get("url")
         if url:
-            try:
-                fetch_subscription(sub_id, url)
-            except (OSError, AttributeError, ValueError):
-                pass  # one failing provider must not stop the others
+            with contextlib.suppress(OSError, AttributeError, ValueError):
+                fetch_subscription(sub_id, url)  # one failing provider must not stop the others
 
 
 # ── Config merge (subscription config -> runnable xray config) ────────────────

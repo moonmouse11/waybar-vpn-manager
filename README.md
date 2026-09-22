@@ -133,11 +133,29 @@ tests/                pytest suite
 ## Development
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install pytest ruff
-.venv/bin/pytest          # 43 tests
-ruff check src/ tests/    # lint
-ruff format src/ tests/   # format
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/pytest          # test suite
+ruff check src tests      # lint
+ruff format src tests     # format
 ```
+
+The test suite mocks every `subprocess`/socket call it's aware of (`happd`,
+`wg-quick`, `awg-quick`, `nmcli`, …), so it never needs real network or a real
+VPN connection — it's testing the plugin's own logic, not real connectivity.
+If you're running it on a machine with a live Happ/VPN connection you care
+about and want a hard guarantee against a mocking gap reaching real system
+state, run it containerized instead — no host `/tmp`/`/run`/`/etc/wireguard`
+mounts, no network:
+
+```bash
+make test-docker-build   # once, or after pyproject.toml's dev deps change
+make test-docker         # every run after that
+```
+
+CI (`.github/workflows/`) runs on GitHub-hosted runners, which have none of
+your local VPN/happd state to begin with — it uses the plain venv path, not
+Docker. `Dockerfile.test` / `make test-docker*` are dev-only; installing the
+plugin (`make install`) never touches Docker.
 
 ## Adding a new VPN provider
 

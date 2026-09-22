@@ -159,7 +159,9 @@ def _happ_processes(fresh: bool = False) -> list[str]:
     """Happ's own managed processes. The keys providers run their xray
     through the same happd — those must not count as 'Happ connected'
     (phantom server in the menu) nor get stopped by a Happ disconnect."""
-    return [p for p in _daemon_running_processes(fresh=fresh) if not p.startswith(KEYS_PROCESS_PREFIX)]
+    return [
+        p for p in _daemon_running_processes(fresh=fresh) if not p.startswith(KEYS_PROCESS_PREFIX)
+    ]
 
 
 def _happ_interfaces() -> list[str]:

@@ -1,0 +1,23 @@
+# Isolated lint/test environment.
+#
+# The source tree is bind-mounted read-only at run time (not baked in via
+# COPY), so local edits are picked up without a rebuild — only rebuild
+# when pyproject.toml's dev deps change.
+#
+# Deliberately run with no host mounts beyond the repo itself and no
+# network: the plugin under test talks to real system state (happd's
+# unix socket at /tmp/happd.sock, /etc/wireguard, wg-quick/awg-quick,
+# nmcli, real network interfaces) whenever a test's mocking has a gap.
+# None of that host state is reachable from inside this container, so a
+# gap fails the test harmlessly instead of touching a live VPN connection.
+# See `make test-docker`.
+FROM python:3.13-slim
+
+WORKDIR /repo
+# Pinned to match pyproject.toml's [project.optional-dependencies].dev —
+# installed directly (not `pip install -e .[dev]`) so the image builds
+# from this file alone, without the rest of the tree (which is
+# bind-mounted at run time, not baked in).
+RUN pip install --no-cache-dir "pytest>=8" "pytest-cov>=5" "ruff>=0.6"
+
+CMD ["sh", "-c", "ruff check --no-cache src tests && pytest -p no:cacheprovider"]

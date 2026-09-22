@@ -70,7 +70,7 @@ def test_parse_providers_added_subscription(tmp_path, monkeypatch):
     providers = _added_providers(tmp_path, monkeypatch, log_text)
     (sub_id,) = [i for i, p in providers.items() if "wirecat" in p["url"]]
     assert sub_id == "h" + hashlib.sha1(
-        "https://shop.wirecat.link/cart/TOKEN".encode()
+        b"https://shop.wirecat.link/cart/TOKEN"
     ).hexdigest()[:10]
     assert providers[sub_id] == {
         "name": "WireCat",
@@ -145,7 +145,7 @@ def test_parse_providers_added_without_name_uses_host(tmp_path, monkeypatch):
     )
     (sub_id,) = providers.keys()
     assert sub_id == "h" + hashlib.sha1(
-        "https://sub.kushmakers.org/new/TOK".encode()
+        b"https://sub.kushmakers.org/new/TOK"
     ).hexdigest()[:10]
     assert providers[sub_id] == {
         "name": "sub.kushmakers.org",

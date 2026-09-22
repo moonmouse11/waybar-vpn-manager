@@ -320,7 +320,8 @@ def menu_loop() -> ActionResult:
         if not conns:
             continue
         active = sum(1 for c in conns if c.active)
-        items.append((f"{provider.name}  ({active}/{len(conns)})", lambda p=provider: provider_menu(p)))
+        label = f"{provider.name}  ({active}/{len(conns)})"
+        items.append((label, lambda p=provider: provider_menu(p)))
 
     # Empty providers are hidden (level 1 lists providers with connections);
     # the empty key-provider import rows below are opt-in via
@@ -435,7 +436,8 @@ def provider_menu(provider) -> ActionResult:
         if conn.active:
             items.append((f"Disconnect {conn.name}{suffix}", lambda c=conn: provider.disconnect(c)))
         else:
-            items.append((f"Connect {conn.name}{suffix}", lambda c=conn: guarded_connect(provider, c)))
+            label = f"Connect {conn.name}{suffix}"
+            items.append((label, lambda c=conn: guarded_connect(provider, c)))
     items.extend(provider_actions(provider))
     items.append(("‹ Back", back_to_main))
     run_items(_unique_labels(items), prompt=provider.name)
@@ -629,7 +631,11 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
         logutil.log(f"walker timed out after {WALKER_TIMEOUT}s — restarting the service")
         subprocess.run(["pkill", "-9", "-f", "walker --gapplication-service"], capture_output=True)
         subprocess.run(["pkill", "-f", "walker -d"], capture_output=True)
-        notify("VPN — Error", "walker завис — сервис перезапущен, откройте меню ещё раз", urgent=True)
+        notify(
+            "VPN — Error",
+            "walker завис — сервис перезапущен, откройте меню ещё раз",
+            urgent=True,
+        )
         return None
     except FileNotFoundError:
         notify("Error", "walker not found", urgent=True)
