@@ -213,6 +213,33 @@ def test_build_runtime_config_merges_like_gui():
     assert any(r.get("protocol") == ["bittorrent"] for r in rules)
 
 
+def test_build_runtime_config_tunnels_dns_out_through_proxy():
+    """dns-in -> direct is needed to bootstrap the proxy outbound's own
+    resolution, but that meant app-level DNS queries (tun-in -> dns-out ->
+    dns-in -> direct) leaked out the real network. dns-out must chain its
+    transport through "proxy" instead."""
+    server_cfg = {
+        "remarks": "test",
+        "outbounds": [{"protocol": "vless", "tag": "proxy"}],
+    }
+    cfg = happmeta.build_runtime_config(server_cfg)
+    dns_out = next(o for o in cfg["outbounds"] if o["tag"] == "dns-out")
+    assert dns_out["proxySettings"] == {"tag": "proxy", "transportLayer": True}
+
+    # a subscription that already ships its own dns outbound must also be
+    # chained, not left leaking
+    server_cfg2 = {
+        "remarks": "test2",
+        "outbounds": [
+            {"protocol": "vless", "tag": "proxy"},
+            {"protocol": "dns", "tag": "dns-out"},
+        ],
+    }
+    cfg2 = happmeta.build_runtime_config(server_cfg2)
+    dns_out2 = next(o for o in cfg2["outbounds"] if o["tag"] == "dns-out")
+    assert dns_out2["proxySettings"] == {"tag": "proxy", "transportLayer": True}
+
+
 def test_all_servers_groups_by_provider(tmp_path, monkeypatch):
     sub_server = {
         "remarks": "🇦🇹 Austria",

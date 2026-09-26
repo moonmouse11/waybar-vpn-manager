@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config
 import happmeta
 import ipinfo
+import ipv6guard
 import killswitch
 import logutil
 from providers import ALL_PROVIDERS
@@ -168,7 +169,29 @@ def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
     result = provider.connect(connection)
     if ks_result and not ks_result.success:
         notify("Killswitch — warning", ks_result.message)
+    _sync_ipv6_guard()
     return result
+
+
+def guarded_disconnect(provider, connection: VPNConnection) -> ActionResult:
+    """provider.disconnect() plus keeping the IPv6 guard in sync — every
+    menu disconnect action should go through this, not provider.disconnect
+    directly, so IPv6 gets restored as soon as nothing is left active."""
+    result = provider.disconnect(connection)
+    _sync_ipv6_guard()
+    return result
+
+
+def _sync_ipv6_guard() -> None:
+    """IPv6 must be off while anything is tunneled (none of our providers
+    route it, so it would otherwise leak straight past every tunnel) and
+    back on once nothing is active."""
+    if active_connections(providers=list(ALL_PROVIDERS)):
+        guard = ipv6guard.disable()
+    else:
+        guard = ipv6guard.enable()
+    if not guard.success:
+        notify("IPv6 guard — warning", guard.message)
 
 
 def disconnect_all() -> ActionResult:
@@ -187,6 +210,7 @@ def disconnect_all() -> ActionResult:
                 stopped.append(f"{provider.name}: {conn.name}")
             else:
                 failed.append(f"{provider.name}: {conn.name}")
+    _sync_ipv6_guard()
     if failed:
         return ActionResult(False, "Failed: " + ", ".join(failed))
     message = ", ".join(stopped) if stopped else "nothing was active"
@@ -216,7 +240,7 @@ def manage_profiles(provider) -> ActionResult:
     if selected == "Delete config":
         return provider.delete_config(conn)
     if selected == "Disconnect":
-        return provider.disconnect(conn)
+        return guarded_disconnect(provider, conn)
     return ActionResult(True, "")
 
 
@@ -392,7 +416,7 @@ def _reconnect(conn: VPNConnection) -> ActionResult:
     provider = next((p for p in ALL_PROVIDERS if p.name == conn.provider), None)
     if provider is None:
         return ActionResult(False, f"Unknown provider: {conn.provider}")
-    down = provider.disconnect(conn)
+    down = guarded_disconnect(provider, conn)
     if not down.success:
         return down
     return guarded_connect(provider, conn)
@@ -434,7 +458,9 @@ def provider_menu(provider) -> ActionResult:
         mark = happmeta.ping_mark(conn.name)
         suffix = f"    {mark}" if mark else ""
         if conn.active:
-            items.append((f"Disconnect {conn.name}{suffix}", lambda c=conn: provider.disconnect(c)))
+            items.append(
+                (f"Disconnect {conn.name}{suffix}", lambda c=conn: guarded_disconnect(provider, c))
+            )
         else:
             label = f"Connect {conn.name}{suffix}"
             items.append((label, lambda c=conn: guarded_connect(provider, c)))
@@ -546,7 +572,7 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
         if info:
             label += f"    {info}"
         if conn.active:
-            items.append((label, lambda c=conn: provider.disconnect(c)))
+            items.append((label, lambda c=conn: guarded_disconnect(provider, c)))
         else:
             items.append((label, lambda c=conn: guarded_connect(provider, c)))
     items.append(("‹ Back", lambda: happ_menu(provider)))

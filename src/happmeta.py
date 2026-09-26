@@ -453,8 +453,16 @@ def build_runtime_config(server_cfg: dict) -> dict:
     cfg["dns"] = dns
 
     outbounds = cfg.get("outbounds") or []
-    if not any(o.get("protocol") == "dns" for o in outbounds):
-        outbounds.append({"protocol": "dns", "tag": "dns-out"})
+    dns_outbound = next((o for o in outbounds if o.get("protocol") == "dns"), None)
+    if dns_outbound is None:
+        dns_outbound = {"protocol": "dns", "tag": "dns-out"}
+        outbounds.append(dns_outbound)
+    # Without this, DNS queries forwarded by dns-out are dialed by the
+    # dns-in rule below (outboundTag "direct") — i.e. straight out the
+    # real network, leaking resolver identity/location even though app
+    # traffic tunnels through "proxy". Chaining dns-out's own transport
+    # through "proxy" keeps queries inside the tunnel instead.
+    dns_outbound.setdefault("proxySettings", {"tag": "proxy", "transportLayer": True})
     cfg["outbounds"] = outbounds
 
     rules = list(cfg.get("routing", {}).get("rules", []))
