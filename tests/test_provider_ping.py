@@ -263,8 +263,8 @@ def test_provider_menu_labels_show_ping(monkeypatch, tmp_path):
     )
     vpn_manager.provider_menu(wg)
     options = seen[0]
-    assert "Connect fast    ✓ 12 ms" in options
-    assert "Connect down    ✗" in options
+    assert "fast    ✓ 12 ms" in options
+    assert "down    ✗" in options
     assert "Disconnect unmeasured" in options  # stale measurement: plain label
     assert not any(o.endswith("unmeasured    ✓ 1 ms") for o in options)
 

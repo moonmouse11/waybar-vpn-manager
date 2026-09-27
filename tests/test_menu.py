@@ -27,6 +27,10 @@ def patch_menu_env(monkeypatch, providers, picks):
     monkeypatch.setattr(vpn_manager.config, "load_config", lambda: config.Config())
     monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
     monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
+    # deterministic default: the real ~/.cache/vpn-manager/reputation.json
+    # could carry real entries from this machine's own use of the feature
+    monkeypatch.setattr(vpn_manager.reputation, "mark", lambda name: "")
+    monkeypatch.setattr(vpn_manager.reputation, "request_update", lambda: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
     monkeypatch.setattr(vpn_manager, "request_ip_update", lambda name: None)
@@ -102,7 +106,7 @@ def test_happ_provider_menu_disambiguates_duplicate_labels(monkeypatch):
     monkeypatch.setattr(vpn_manager.killswitch, "resume_for_happ", lambda extra_ips=None: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    picks = iter(["Connect Same (2)"])
+    picks = iter(["Same (2)"])
     seen = []
     monkeypatch.setattr(
         vpn_manager,
@@ -111,7 +115,7 @@ def test_happ_provider_menu_disambiguates_duplicate_labels(monkeypatch):
     )
 
     vpn_manager.happ_provider_menu(provider, "P", entries)
-    assert seen[0] == ["Connect Same", "Connect Same (2)", "‹ Back"]
+    assert seen[0] == ["Same", "Same (2)", "‹ Back"]
     # picking the disambiguated label must run the SECOND entry's action
     assert provider.connected == [made[1]]
 
@@ -127,7 +131,10 @@ def _happ_menu_setup(monkeypatch, tmp_path, pings):
         "Happ", [VPNConnection(name="s1", provider="Happ", active=True)]
     )
     monkeypatch.setattr(vpn_manager.happmeta, "request_ping_update", lambda: None)
-    monkeypatch.setattr(vpn_manager.happmeta, "all_servers", lambda: servers)
+    monkeypatch.setattr(vpn_manager.happmeta, "request_subscription_update", lambda: None)
+    monkeypatch.setattr(vpn_manager.reputation, "request_update", lambda: None)
+    monkeypatch.setattr(vpn_manager.reputation, "mark", lambda name: "")
+    monkeypatch.setattr(vpn_manager.happmeta, "all_servers", lambda allow_fetch=True: servers)
     ping_file = tmp_path / "ping.json"
     monkeypatch.setattr(vpn_manager.happmeta, "PING_CACHE", ping_file)
     if pings is not None:
@@ -185,7 +192,36 @@ def test_happ_provider_menu_labels_show_availability(monkeypatch, tmp_path):
     vpn_manager.happ_provider_menu(IdleProvider(), "P", entries)
     assert "✓ 12 ms" in seen[0][0]
     assert "✗" in seen[0][1]
-    assert seen[0][2] == "Connect unknown"  # stale -> no mark at all
+    assert seen[0][2] == "unknown"  # stale -> no mark at all
+
+
+def test_happ_provider_menu_shows_reputation_mark(monkeypatch, tmp_path):
+    """A server flagged by reputation.mark() gets ⚠RU even with no ping data."""
+
+    class IdleProvider:
+        name = "Happ"
+
+        def connect(self, conn):
+            return ActionResult(True, "ok")
+
+        def disconnect(self, conn):
+            return ActionResult(True, "ok")
+
+    monkeypatch.setattr(vpn_manager.happmeta, "PING_CACHE", tmp_path / "ping.json")
+    monkeypatch.setattr(vpn_manager.happmeta, "server_params", lambda name: None)
+    monkeypatch.setattr(
+        vpn_manager.reputation, "mark", lambda name: " ⚠RU" if name == "ru-bridge" else ""
+    )
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    entries = [{"name": "ru-bridge", "active": False}, {"name": "clean", "active": False}]
+    vpn_manager.happ_provider_menu(IdleProvider(), "P", entries)
+    assert any(o == "ru-bridge    ⚠RU" for o in seen[0])
+    assert any(o == "clean" for o in seen[0])
 
 
 def test_happ_menu_provider_labels_include_ping_summary(monkeypatch, tmp_path):
@@ -213,9 +249,40 @@ def test_happ_menu_provider_label_without_ping_data(monkeypatch, tmp_path):
     assert "P2" in options
 
 
+def test_happ_menu_never_blocks_on_the_network(monkeypatch):
+    """Regression: happ_menu() must read all_servers() cache-only and kick
+    off the background refresh, exactly like providers/happ.py's --status
+    path — it must NEVER call the network-fetching default (allow_fetch=True
+    fetches every stale subscription synchronously; measured 15s against a
+    real stale cache, see CLAUDE.md)."""
+    provider = FakeProvider("Happ", [])
+    monkeypatch.setattr(vpn_manager.happmeta, "request_ping_update", lambda: None)
+    monkeypatch.setattr(vpn_manager.reputation, "request_update", lambda: None)
+    calls = []
+    monkeypatch.setattr(
+        vpn_manager.happmeta,
+        "request_subscription_update",
+        lambda: calls.append("request_subscription_update"),
+    )
+
+    def fake_all_servers(allow_fetch=True):
+        calls.append(("all_servers", allow_fetch))
+        if allow_fetch:
+            raise AssertionError("happ_menu() must never fetch subscriptions synchronously")
+        return []
+
+    monkeypatch.setattr(vpn_manager.happmeta, "all_servers", fake_all_servers)
+    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": None)
+
+    vpn_manager.happ_menu(provider)
+
+    assert "request_subscription_update" in calls
+    assert ("all_servers", False) in calls
+
+
 def test_two_level_connect(monkeypatch):
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
-    patch_menu_env(monkeypatch, [wg], picks=["WireGuard  (0/1)", "Connect nl"])
+    patch_menu_env(monkeypatch, [wg], picks=["WireGuard  (0/1)", "nl"])
     vpn_manager.run_menu()
     assert wg.connected == ["nl"]
 
@@ -225,6 +292,30 @@ def test_two_level_disconnect_active(monkeypatch):
     patch_menu_env(monkeypatch, [wg], picks=["WireGuard  (1/1)", "Disconnect nl"])
     vpn_manager.run_menu()
     assert wg.disconnected == ["nl"]
+
+
+def test_provider_menu_shows_reputation_mark(monkeypatch):
+    """A suspicious connection's row carries the ⚠RU mark from reputation.mark()."""
+    wg = FakeProvider(
+        "WireGuard",
+        [
+            VPNConnection(name="bad", provider="WireGuard", active=False),
+            VPNConnection(name="good", provider="WireGuard", active=False),
+        ],
+    )
+    patch_menu_env(monkeypatch, [wg], picks=[])
+    monkeypatch.setattr(
+        vpn_manager.reputation, "mark", lambda name: " ⚠RU" if name == "bad" else ""
+    )
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.provider_menu(wg)
+    assert any(o.startswith("bad") and "⚠RU" in o for o in seen[0])
+    assert any(o == "good" for o in seen[0])
 
 
 def test_back_returns_to_level1(monkeypatch):
@@ -712,7 +803,7 @@ def test_happ_provider_menu_shows_traffic_info(monkeypatch):
     )
 
     vpn_manager.happ_provider_menu(provider, "P", entries)
-    assert seen[0] == ["ⓘ Трафик 1838 GB / ∞ · до 14.12.2026", "Connect s1", "‹ Back"]
+    assert seen[0] == ["ⓘ Трафик 1838 GB / ∞ · до 14.12.2026", "s1", "‹ Back"]
 
     # picking the ⓘ entry notifies with the full card, connects nothing
     info_label = "ⓘ Трафик 1838 GB / ∞ · до 14.12.2026"
@@ -734,7 +825,7 @@ def test_happ_provider_menu_omits_missing_info_parts(monkeypatch):
         monkeypatch, entries, info, seen, notifications, picks=[None]
     )
     vpn_manager.happ_provider_menu(provider, "P", entries)
-    assert seen[0] == ["Connect s1", "‹ Back"]  # nothing worth showing -> no ⓘ
+    assert seen[0] == ["s1", "‹ Back"]  # nothing worth showing -> no ⓘ
 
 
 def test_happ_provider_menu_no_info_entry_without_record(monkeypatch):
@@ -746,4 +837,4 @@ def test_happ_provider_menu_no_info_entry_without_record(monkeypatch):
         monkeypatch, entries, None, seen, notifications, picks=[None]
     )
     vpn_manager.happ_provider_menu(provider, "P", entries)
-    assert seen[0] == ["Connect s1", "‹ Back"]
+    assert seen[0] == ["s1", "‹ Back"]

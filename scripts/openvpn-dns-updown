@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# openvpn-dns-updown — applies/reverts OpenVPN-pushed DNS via systemd-resolved.
+#
+# Without this, DNS pushed by an OpenVPN server (`dhcp-option DNS ...`) is
+# silently ignored on Linux — the OS keeps whatever resolver it already had,
+# which is invisible to OpenVPN's own routing and can leak queries outside
+# the tunnel. This is invoked BY OpenVPN itself as --up/--down (never run it
+# by hand) and reads the env vars OpenVPN sets for those scripts:
+#   $dev              — tun/tap interface name
+#   $foreign_option_N — one pushed option per var, e.g. "dhcp-option DNS 10.8.0.1"
+#
+# Installed root-owned to /usr/local/bin by install.sh; openvpn itself
+# already runs as root here (see providers/openvpn.py), so this runs as
+# root too without a separate sudoers entry.
+#
+# Assumes full-tunnel routing (no split-DNS hint from the server): when the
+# server pushes DNS but no DOMAIN option, this claims the interface as the
+# default resolver for every domain (`resolvectl domain ~.`). That is the
+# common case for personal VPN configs but wrong for a split-tunnel
+# corporate VPN that only wants specific internal domains resolved via it.
+set -euo pipefail
+
+cmd="${1:?usage: $0 up|down}"
+iface="${dev:?\$dev not set by openvpn}"
+
+down() {
+    resolvectl revert "$iface" 2>/dev/null || true
+}
+
+up() {
+    local dns=() domains=()
+    local i=1 var val
+    while :; do
+        var="foreign_option_$i"
+        val="${!var:-}"
+        [[ -z $val ]] && break
+        case "$val" in
+            "dhcp-option DNS "*) dns+=("${val#dhcp-option DNS }") ;;
+            "dhcp-option DNS6 "*) dns+=("${val#dhcp-option DNS6 }") ;;
+            "dhcp-option DOMAIN "*) domains+=("${val#dhcp-option DOMAIN }") ;;
+        esac
+        i=$((i + 1))
+    done
+    [[ ${#dns[@]} -gt 0 ]] || exit 0  # server pushed nothing — leave system DNS alone
+
+    resolvectl dns "$iface" "${dns[@]}"
+    if [[ ${#domains[@]} -gt 0 ]]; then
+        resolvectl domain "$iface" "${domains[@]}"
+    else
+        resolvectl domain "$iface" '~.'
+    fi
+}
+
+case "$cmd" in
+    up) up ;;
+    down) down ;;
+    *) echo "unknown: $cmd" >&2; exit 1 ;;
+esac

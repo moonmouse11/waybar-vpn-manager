@@ -18,7 +18,8 @@ sudo pacman -S --needed --noconfirm python wireguard-tools openvpn openresolv so
 SUDOERS_FILE="/etc/sudoers.d/vpn-manager"
 # Managed by this installer: rewrite on every run so upgrades pick up new rules.
 # Rules are narrowed to the exact call patterns used by the providers:
-#   wg-quick/awg-quick up/down <profile>, openvpn --config/--daemon/--writepid,
+#   wg-quick/awg-quick up/down <profile>, openvpn --config/--daemon/--writepid
+#   (+ --script-security/--up/--down wiring openvpn-dns-updown, see below),
 #   mkdir/rm/cp/chmod only under /run/openvpn, /etc/wireguard,
 #   /etc/amnezia/amneziawg, /etc/openvpn/client,
 #   cat on the same config globs (menu-imported configs are root:0600 — the
@@ -27,6 +28,11 @@ SUDOERS_FILE="/etc/sudoers.d/vpn-manager"
 #   sysctl -w net.ipv6.conf.{all,default}.disable_ipv6={0,1} (IPv6 leak guard —
 #   none of the providers tunnel IPv6, so it's turned off system-wide while any
 #   tunnel is up and restored on full disconnect, see src/ipv6guard.py).
+# openvpn-dns-updown (root-owned, see scripts/) applies OpenVPN-pushed DNS via
+# systemd-resolved on connect and reverts it on disconnect — without it,
+# server-pushed DNS is silently ignored on Linux, same class of leak as the
+# xray dns-out fix in happmeta.py. It needs no sudoers entry of its own:
+# openvpn already runs as root here, so its --up/--down child does too.
 # `kill <pid>` stays broad (arbitrary numeric PIDs cannot be pattern-matched).
 # THREAT MODEL: sudoers matches command arguments lexically and `*` spans
 # `/` and `..`, so `sudo -n cat /etc/wireguard/../../../etc/shadow` matches
@@ -40,7 +46,7 @@ SUDOERS_FILE="/etc/sudoers.d/vpn-manager"
 # If a narrowed rule ever blocks a legit call, fall back to the broad form:
 #   ... NOPASSWD: /usr/bin/wg-quick, /usr/bin/openvpn, /usr/bin/kill, /usr/bin/mkdir, /usr/bin/rm, /usr/bin/cp, /usr/bin/chmod, ...
 echo "==> Writing sudoers rule..."
-echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/awg-quick, /usr/bin/openvpn --config * --daemon --writepid /run/openvpn/client-*.pid, /usr/bin/kill, /usr/bin/mkdir -p /run/openvpn, /usr/bin/rm -f /run/openvpn/client-*.pid, /usr/bin/rm -f /etc/wireguard/*.conf, /usr/bin/rm -f /etc/amnezia/amneziawg/*.conf, /usr/bin/cp * /etc/wireguard/*, /usr/bin/cp * /etc/amnezia/amneziawg/*, /usr/bin/cp * /etc/openvpn/client/*, /usr/bin/chmod 600 /etc/wireguard/*, /usr/bin/chmod 600 /etc/amnezia/amneziawg/*, /usr/bin/chmod 600 /etc/openvpn/client/*, /usr/bin/cat /etc/wireguard/*, /usr/bin/cat /etc/amnezia/amneziawg/*, /usr/bin/cat /etc/openvpn/client/*, /usr/bin/systemctl enable wg-quick@*, /usr/bin/systemctl disable wg-quick@*, /usr/bin/systemctl enable awg-quick@*, /usr/bin/systemctl disable awg-quick@*, /usr/local/bin/happ-killswitch, /usr/bin/sysctl -w net.ipv6.conf.all.disable_ipv6=1, /usr/bin/sysctl -w net.ipv6.conf.all.disable_ipv6=0, /usr/bin/sysctl -w net.ipv6.conf.default.disable_ipv6=1, /usr/bin/sysctl -w net.ipv6.conf.default.disable_ipv6=0" \
+echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/wg-quick, /usr/bin/awg-quick, /usr/bin/openvpn --config * --daemon --writepid /run/openvpn/client-*.pid --script-security 2 --up /usr/local/bin/openvpn-dns-updown up --down /usr/local/bin/openvpn-dns-updown down, /usr/bin/kill, /usr/bin/mkdir -p /run/openvpn, /usr/bin/rm -f /run/openvpn/client-*.pid, /usr/bin/rm -f /etc/wireguard/*.conf, /usr/bin/rm -f /etc/amnezia/amneziawg/*.conf, /usr/bin/cp * /etc/wireguard/*, /usr/bin/cp * /etc/amnezia/amneziawg/*, /usr/bin/cp * /etc/openvpn/client/*, /usr/bin/chmod 600 /etc/wireguard/*, /usr/bin/chmod 600 /etc/amnezia/amneziawg/*, /usr/bin/chmod 600 /etc/openvpn/client/*, /usr/bin/cat /etc/wireguard/*, /usr/bin/cat /etc/amnezia/amneziawg/*, /usr/bin/cat /etc/openvpn/client/*, /usr/bin/systemctl enable wg-quick@*, /usr/bin/systemctl disable wg-quick@*, /usr/bin/systemctl enable awg-quick@*, /usr/bin/systemctl disable awg-quick@*, /usr/local/bin/happ-killswitch, /usr/bin/sysctl -w net.ipv6.conf.all.disable_ipv6=1, /usr/bin/sysctl -w net.ipv6.conf.all.disable_ipv6=0, /usr/bin/sysctl -w net.ipv6.conf.default.disable_ipv6=1, /usr/bin/sysctl -w net.ipv6.conf.default.disable_ipv6=0" \
     | sudo tee "$SUDOERS_FILE" > /dev/null
 sudo chmod 440 "$SUDOERS_FILE"
 sudo visudo -cf "$SUDOERS_FILE" > /dev/null && echo "==> sudoers rule validated"
@@ -53,6 +59,11 @@ sudo chown root:root /usr/local/bin/happ-killswitch
 sudo chmod 755 /usr/local/bin/happ-killswitch
 # Remove the user-writable copy if it exists (superseded by the root-owned one)
 rm -f "$HOME/.local/bin/happ-killswitch"
+
+echo "==> Installing openvpn-dns-updown to /usr/local/bin..."
+sudo cp "$REPO_DIR/scripts/openvpn-dns-updown" /usr/local/bin/openvpn-dns-updown
+sudo chown root:root /usr/local/bin/openvpn-dns-updown
+sudo chmod 755 /usr/local/bin/openvpn-dns-updown
 
 # ── /etc/wireguard permissions ────────────────────────────────────────────────
 

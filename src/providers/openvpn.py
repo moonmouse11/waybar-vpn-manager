@@ -5,6 +5,7 @@ from .base import ActionResult, VPNConnection, VPNProvider, read_config_text
 
 OVPN_DIR = Path("/etc/openvpn/client")
 PID_DIR = Path("/run/openvpn")
+DNS_UPDOWN = "/usr/local/bin/openvpn-dns-updown"
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
@@ -100,6 +101,12 @@ class OpenVPNProvider(VPNProvider):
                 "--daemon",
                 "--writepid",
                 str(pid_file),
+                "--script-security",
+                "2",
+                "--up",
+                f"{DNS_UPDOWN} up",
+                "--down",
+                f"{DNS_UPDOWN} down",
             ]
         )
         if code != 0:

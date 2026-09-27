@@ -20,6 +20,7 @@ import ipinfo
 import ipv6guard
 import killswitch
 import logutil
+import reputation
 from providers import ALL_PROVIDERS
 from providers.base import (
     ActionResult,
@@ -453,16 +454,17 @@ def provider_menu(provider) -> ActionResult:
         return happ_menu(provider)
 
     happmeta.request_ping_update()
+    reputation.request_update()
     items: list[tuple[str, callable]] = []
     for conn in provider.connections():
-        mark = happmeta.ping_mark(conn.name)
-        suffix = f"    {mark}" if mark else ""
+        info = (happmeta.ping_mark(conn.name) + reputation.mark(conn.name)).strip()
+        suffix = f"    {info}" if info else ""
         if conn.active:
             items.append(
                 (f"Disconnect {conn.name}{suffix}", lambda c=conn: guarded_disconnect(provider, c))
             )
         else:
-            label = f"Connect {conn.name}{suffix}"
+            label = f"{conn.name}{suffix}"
             items.append((label, lambda c=conn: guarded_connect(provider, c)))
     items.extend(provider_actions(provider))
     items.append(("‹ Back", back_to_main))
@@ -481,8 +483,10 @@ def back_to_main() -> ActionResult:
 
 def happ_menu(provider) -> ActionResult:
     """Happ level 2: subscription providers, each leading to its servers."""
+    happmeta.request_subscription_update()
     happmeta.request_ping_update()
-    servers = happmeta.all_servers()
+    reputation.request_update()
+    servers = happmeta.all_servers(allow_fetch=False)
     active_names = {c.name for c in provider.connections() if c.active}
 
     # Exact match, or the unique substring match (GUI names can lack the
@@ -566,9 +570,8 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
 
     for entry in entries:
         conn = VPNConnection(name=entry["name"], provider="Happ", active=entry["active"])
-        icon = "Disconnect" if conn.active else "Connect"
-        label = f"{icon} {conn.name}"
-        info = happmeta.server_info_suffix(conn.name)
+        label = f"Disconnect {conn.name}" if conn.active else conn.name
+        info = (happmeta.server_info_suffix(conn.name) + reputation.mark(conn.name)).strip()
         if info:
             label += f"    {info}"
         if conn.active:
@@ -763,6 +766,11 @@ def main():
         action="store_true",
         help="Refresh Happ subscription caches in the background (internal)",
     )
+    group.add_argument(
+        "--update-reputation",
+        action="store_true",
+        help="Refresh server IP-reputation cache in the background (internal)",
+    )
     args = parser.parse_args()
     if args.keys_keeper is not None and args.keys_keeper[0] not in ("ss", "vless"):
         kind = args.keys_keeper[0]
@@ -776,6 +784,8 @@ def main():
         ipinfo.update(args.update_ip)
     elif args.update_ping:
         happmeta.write_pings(_collect_ping_targets())
+    elif args.update_reputation:
+        reputation.write_reputations(_collect_ping_targets())
     elif args.update_subs:
         happmeta.update_subscriptions()
     elif args.happ_keeper is not None:

@@ -59,6 +59,34 @@ def _split_host_port(value: str, default_port: int) -> tuple[str, int] | None:
     return v, default_port
 
 
+_NO_DNS_WARNING = " — ⚠ no DNS= in [Interface], DNS may not route through the tunnel"
+
+
+def _has_dns_directive(path: Path) -> bool:
+    """Whether [Interface] sets DNS= — wg-quick/awg-quick only reconfigure
+    the system resolver when this is present; without it, DNS keeps using
+    whatever was already configured (see CLAUDE.md's IPv6 leak guard notes
+    for the same class of problem on the Happ side). Unreadable/garbled
+    files are treated as having it, so a read glitch never blocks import
+    over an unrelated warning."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return True
+    in_interface = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_interface = s[1:-1].strip().lower() == "interface"
+            continue
+        if not in_interface or "=" not in s:
+            continue
+        key, _, _ = s.partition("=")
+        if key.strip().lower() == "dns":
+            return True
+    return False
+
+
 def wg_endpoint(conf_path) -> tuple[str, int] | None:
     """(host, port) of a config's [Peer] Endpoint, None when absent/garbled."""
     text = read_config_text(conf_path)
@@ -203,6 +231,11 @@ class WireGuardProvider(VPNProvider):
         if dest.exists():
             return ActionResult(success=False, message=f"Config already exists: {dest.name}")
 
+        # Read before copying: the source is still a plain user-owned file
+        # here, the copy becomes root:0600 (see below) and unreadable to us
+        # without another sudo round-trip.
+        dns_warning = "" if _has_dns_directive(src) else _NO_DNS_WARNING
+
         code, out = _run(["sudo", "cp", str(src), str(dest)])
         if code != 0:
             return ActionResult(success=False, message=f"Failed to copy: {out}")
@@ -211,7 +244,7 @@ class WireGuardProvider(VPNProvider):
         if code != 0:
             return ActionResult(success=False, message=f"Failed to set permissions: {out}")
 
-        return ActionResult(success=True, message=f"Imported: {src.name}")
+        return ActionResult(success=True, message=f"Imported: {src.name}{dns_warning}")
 
 
 class AmneziaWGProvider(WireGuardProvider):

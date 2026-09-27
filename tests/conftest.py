@@ -12,6 +12,7 @@ import pytest
 
 import ipv6guard
 import logutil
+import reputation
 
 
 def pytest_runtest_setup(item):
@@ -33,3 +34,13 @@ def _no_real_sysctl(monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(ipv6guard.subprocess, "run", lambda *a, **k: _Result())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_reputation_subprocess(monkeypatch):
+    """Same rationale as _no_real_sysctl: reputation.request_update() spawns
+    a background sweep whenever its cache looks stale (true by default in a
+    fresh test env), which would otherwise make real network calls out of a
+    test run. test_reputation.py re-patches Popen itself per case, which
+    layers on top of this."""
+    monkeypatch.setattr(reputation.subprocess, "Popen", lambda *a, **k: None)
