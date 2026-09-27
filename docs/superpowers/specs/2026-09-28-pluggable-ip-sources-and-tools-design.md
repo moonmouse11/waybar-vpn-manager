@@ -40,14 +40,21 @@ optionally walk through the resulting configuration surface interactively.
   (a single lookup), never by the daily background sweep across 100+ Happ
   servers (`write_reputations`) — free sources keep doing that job, so a
   paid source's monthly quota is never at risk from routine menu use.
-- Reorganize `🔍 DNS Leak Test`, `ℹ️ IP Info`, the killswitch toggle, and a
-  new `🔎 Subdomain Search` (crt.name) under one `🛠 Tools` submenu.
+- Reorganize `🔍 DNS Leak Test`, `ℹ️ IP Info`, the killswitch toggle, and four
+  new entries — `🔎 Subdomain Search` (crt.name), `⚡ Speed Test`,
+  `🔄 Refresh All`, `🗑 Clear Caches`, `⚙ Settings` — under one `🛠 Tools`
+  submenu.
 - Let `config.json` control which VPN providers, which Tools entries, and
   which IP sources are active — the provider-hiding piece already exists
   (`cfg.providers`); this adds the equivalent for Tools and IP sources.
 - `make install` can walk through this configuration interactively,
   without ever clobbering an existing `config.json` (including API keys)
-  unless the user explicitly asks to reconfigure.
+  unless the user explicitly asks to reconfigure — and the same walk is
+  reachable later from `🛠 Tools → ⚙ Settings`, without reinstalling.
+- Confirmed during review: ping/dead-connection status (`happmeta.
+  ping_mark`) already covers every provider, not just Happ, via the shared
+  `PING_CACHE` and `_collect_ping_targets()` — no gap, just the marker
+  itself (`✗` → `⛔`) gets easier to spot in a busy list.
 
 ## Non-goals
 
@@ -58,9 +65,9 @@ optionally walk through the resulting configuration surface interactively.
 - Not changing how the *free* sources behave in the background sweep beyond
   moving their code into the new package — `write_reputations()`'s caching,
   pacing, and dedupe-by-host logic are unchanged.
-- Not adding a full in-menu settings editor beyond the install-time wizard
-  and the existing killswitch toggle — provider/tool/source visibility
-  stays a `config.json` concern, edited by hand or via the wizard.
+- Not adding arbitrary free-form settings editing — the in-menu `⚙ Settings`
+  action runs the exact same fixed walk as `--configure` (providers, tools,
+  sources/keys); it is not a general config.json editor.
 
 ## Architecture: `src/ipsources/`
 
@@ -245,21 +252,33 @@ items.append(("🛠 Tools", tools_menu))
 ```
 
 ```python
+# single source of truth for both tools_menu()'s rows and the configure
+# wizard's questions (key, label, action) — killswitch is handled
+# separately in both places since its row reflects live on/off state
+# (_killswitch_item()), not a fixed action function.
+TOOLS = [
+    ("dns_leak_test", "🔍 DNS Leak Test", dns_leak_test_menu),
+    ("ip_info", "ℹ️ IP Info", ip_info_menu),
+    ("subdomain_search", "🔎 Subdomain Search", subdomain_search_menu),
+    ("speed_test", "⚡ Speed Test", speed_test_menu),
+    ("refresh_all", "🔄 Refresh All", refresh_all_menu),
+    ("clear_caches", "🗑 Clear Caches", clear_caches_menu),
+    ("settings", "⚙ Settings", settings_menu),
+]
+
 def tools_menu() -> ActionResult:
     cfg = config.load_config()
-    items = []
-    if cfg.tool_visible("dns_leak_test"):
-        items.append(("🔍 DNS Leak Test", dns_leak_test_menu))
-    if cfg.tool_visible("ip_info"):
-        items.append(("ℹ️ IP Info", ip_info_menu))
-    if cfg.tool_visible("subdomain_search"):
-        items.append(("🔎 Subdomain Search", subdomain_search_menu))
+    items = [(label, fn) for key, label, fn in TOOLS if cfg.tool_visible(key)]
     if cfg.tool_visible("killswitch"):
         items.append(_killswitch_item())
     items.append(("‹ Back", back_to_main))
     run_items(_unique_labels(items), prompt="Tools")
     return ActionResult(True, "")
 ```
+
+New `tools_visible` keys, defaulting to `true` like the rest: `speed_test`,
+`refresh_all`, `clear_caches`, `settings` (alongside the existing
+`dns_leak_test`, `ip_info`, `killswitch`, `subdomain_search`).
 
 `ip_info_menu()` changes from two hardcoded rows to one row group per
 enabled source:
@@ -306,6 +325,149 @@ def subdomain_search_menu() -> ActionResult:
 `walker -d -I -p ...` invocation out of `import_config_file()` so both
 call sites share it (it already gets `WALKER_WIDTH`/`WALKER_MAXWIDTH`).
 
+### New: Dead-connection marker (all providers)
+
+`happmeta.ping_mark(name)` already exists and already covers every
+provider, not just Happ — confirmed during spec review:
+`_collect_ping_targets()` (`vpn_manager.py`) combines `happmeta.
+ping_targets()` with every `ALL_PROVIDERS` member's own `ping_targets()`
+(WireGuard/AmneziaWG/OpenVPN/Keys all implement it), into the one shared
+`PING_CACHE` that `ping_mark()`/`server_info_suffix()` read regardless of
+which provider's menu is asking. No gap here, just a display tweak:
+
+```python
+def ping_mark(name: str) -> str:
+    entry = _fresh_ping_entry(name)
+    if entry is None:
+        return ""
+    if entry.get("ms") is None:
+        return "⛔"   # was "✗" — more visible in a busy server list
+    return f"✓ {entry['ms']:.0f} ms"
+```
+
+One function, so every caller (`provider_menu()`, `happ_provider_menu()`)
+picks it up automatically.
+
+### New: Refresh All
+
+```python
+def refresh_all_menu() -> ActionResult:
+    """Force a ping sweep (every provider) + Happ subscription sync now,
+    bypassing PING_MAX_AGE/SUB_MAX_AGE — request_ping_update()/
+    request_subscription_update() are staleness-gated and would otherwise
+    no-op if the last sweep was recent. Reputation is deliberately excluded
+    (its own daily cadence + IPAPI_PACE already make it a multi-minute
+    background job; forcing it from a menu click isn't 'refresh now', it's
+    'wait a while', which belongs to its own timer, not this button)."""
+    subprocess.Popen(
+        [sys.executable, str(MANAGER), "--update-ping"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    subprocess.Popen(
+        [sys.executable, str(MANAGER), "--update-subs"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    return ActionResult(True, "Обновление запущено в фоне")
+```
+
+Unconditional spawn (no staleness check) is exactly what makes this
+different from what already happens automatically — the point is "do it
+now," not "do it now if it wasn't already about to happen."
+
+### New: Clear Caches
+
+Every cache this project writes already lives under one directory,
+confirmed by reading each module's cache path constant: `happmeta.
+PING_CACHE`, `happmeta.PROVIDERS_CACHE`, `happmeta.SUB_CACHE_DIR` (holds
+`subscription-*.json`), `reputation.CACHE`, `ipinfo.CACHE_PATH`,
+`providers/base.py`'s `RATE_CACHE` — all `~/.cache/vpn-manager/<file>.json`.
+`~/.config/happ-capture/` is **not** touched — that's captured server data,
+not a cache.
+
+```python
+def clear_caches_menu() -> ActionResult:
+    cache_dir = Path.home() / ".cache/vpn-manager"
+    removed = 0
+    for f in cache_dir.glob("*.json"):
+        with contextlib.suppress(OSError):
+            f.unlink()
+            removed += 1
+    return ActionResult(True, f"Кэш очищен ({removed} файлов) — пересоберётся сам")
+```
+
+Everything that reads these caches already tolerates a missing file
+(`json.loads(path.read_text())` wrapped in `except (OSError,
+json.JSONDecodeError): return {}` is the established pattern in every
+module here) — deleting them is safe by construction, no new fallback
+code needed.
+
+### New: Speed Test
+
+Single-measurement download throughput against Cloudflare's public speed
+test endpoint (no auth, this is the same endpoint speed.cloudflare.com's
+own page uses): `https://speed.cloudflare.com/__down?bytes=10000000` (10
+MB). New tiny module `src/speedtest.py`:
+
+```python
+def measure() -> float | None:
+    """MB/s over a single 10 MB download through the current default
+    route (i.e. through the tunnel if one is up), or None on failure."""
+    url = "https://speed.cloudflare.com/__down?bytes=10000000"
+    try:
+        t0 = time.perf_counter()
+        with urllib.request.urlopen(url, timeout=20) as resp:
+            n = len(resp.read())
+        dt = time.perf_counter() - t0
+    except (OSError, ValueError):
+        return None
+    return (n / 1_000_000) / dt if dt > 0 else None
+```
+
+`speed_test_menu()` notifies "Тест запущен…" (a 10 MB download over a
+slow/throttled VPN could take several seconds), then shows the result —
+synchronous is fine here the same way `dns_leak_test_menu()` already
+accepts a few seconds of blocking for an explicit, user-initiated click.
+
+### New: Settings (in-menu, no reinstall)
+
+Same wizard as `--configure` (see below), reachable without re-running
+`make install`. The wizard's actual settings walk (which providers, which
+tools, which sources/keys) must not be written twice — it's authored once
+against a small `Prompter` interface, with a terminal implementation for
+install-time and a walker implementation for in-menu use:
+
+```python
+class Prompter(ABC):
+    def confirm(self, question: str, default: bool) -> bool: ...
+    def text(self, question: str) -> str: ...  # "" means skipped/cancelled
+
+class TerminalPrompter(Prompter):
+    def confirm(self, question, default):
+        suffix = "[Y/n]" if default else "[y/N]"
+        answer = input(f"{question} {suffix} ").strip().lower()
+        return default if not answer else answer in ("y", "yes", "д", "да")
+    def text(self, question):
+        return input(f"{question}: ").strip()
+
+class WalkerPrompter(Prompter):
+    def confirm(self, question, default):
+        selected = walker_select(["Да", "Нет"], prompt=question)
+        return (selected == "Да") if selected else default
+    def text(self, question):
+        return walker_input(question)
+
+def run_configure_wizard(prompter: Prompter) -> None:
+    ...  # the walk itself (providers/tools/sources), calling prompter.confirm()/text()
+    config.save_config(cfg)
+```
+
+`--configure` (CLI) constructs `TerminalPrompter()`; `settings_menu()`
+(Tools) constructs `WalkerPrompter()` and runs the identical walk — one
+list of questions, two front ends. The existing-config confirmation gate
+(`config.json` already exists → ask before touching it) applies to both,
+since `settings_menu()` is exactly as capable of overwriting saved API
+keys as a second `make install` run is.
+
 ## Install-time configuration wizard
 
 New CLI flag on `vpn_manager.py`: `--configure` (a user-facing interactive
@@ -317,14 +479,20 @@ echo "==> Configuration..."
 python3 "$REPO_DIR/src/vpn_manager.py" --configure
 ```
 
-Behavior:
+which is just:
 
 ```python
-def run_configure_wizard() -> None:
+elif args.configure:
+    run_configure_wizard(TerminalPrompter())
+```
+
+`run_configure_wizard(prompter)` — the actual walk, shared with the
+in-menu `⚙ Settings` action (`WalkerPrompter()`, see above):
+
+```python
+def run_configure_wizard(prompter: Prompter) -> None:
     if config.CONFIG_PATH.exists():
-        answer = input("Конфиг уже существует. Перенастроить? [y/N] ").strip().lower()
-        if answer not in ("y", "yes", "д", "да"):
-            print("Оставляю текущий конфиг без изменений.")
+        if not prompter.confirm("Конфиг уже существует. Перенастроить?", default=False):
             return
         cfg = config.load_config()   # existing values as the starting point
     else:
@@ -332,31 +500,39 @@ def run_configure_wizard() -> None:
 
     # 1. VPN providers to show
     for provider in ALL_PROVIDERS:
-        ...  # y/N per provider, default = current cfg.provider_visible(name)
+        visible = prompter.confirm(f"Показывать {provider.name}?",
+                                    default=cfg.provider_visible(provider.name))
+        cfg.providers[provider.name.lower()] = visible
 
-    # 2. Tools to show
-    for key, label in (("dns_leak_test", "DNS Leak Test"), ("ip_info", "IP Info"),
-                        ("killswitch", "Killswitch"), ("subdomain_search", "Subdomain Search")):
-        ...  # y/N, default = current cfg.tool_visible(key)
+    # 2. Tools to show (killswitch included — it's not in TOOLS since its
+    # row reflects live state, but its visibility is still a plain toggle)
+    for key, label, _fn in [*TOOLS, ("killswitch", "Killswitch", None)]:
+        visible = prompter.confirm(f"Показывать инструмент «{label}»?",
+                                    default=cfg.tool_visible(key))
+        cfg.tools_visible[key] = visible
 
     # 3. IP-intelligence sources
     for source in ipsources.ALL_SOURCES:
         if source.needs_api_key:
-            key = input(f"API key for {source.name} (Enter to skip): ").strip()
+            existing = cfg.ip_sources.get(source.key, {}).get("api_key", "")
+            key = prompter.text(f"API-ключ {source.name} (Enter — оставить как есть/пропустить)")
             if key:
                 cfg.ip_sources.setdefault(source.key, {})["api_key"] = key
+            elif existing:
+                pass  # keep what was already there
         else:
-            ...  # y/N, default = current is_enabled()
+            enabled = prompter.confirm(f"Использовать {source.name}?",
+                                        default=source.is_enabled())
+            cfg.ip_sources.setdefault(source.key, {})["enabled"] = enabled
 
     config.save_config(cfg)
-    print("Готово.")
 ```
 
-Plain `input()` — `make install` already runs interactively in a real
-terminal (the user answers `sudo` prompts during the same run), so this
-needs no new I/O plumbing. Never runs unless the user opts in via the
-`[y/N]` gate on re-install; always runs once, uninterrupted, on a fresh
-install (no existing `config.json` to protect).
+`make install` runs interactively in a real terminal already (the user
+answers `sudo` prompts during the same run), so `TerminalPrompter` needs no
+new I/O plumbing. Never runs unless the user opts in via the confirm gate
+on re-install; always runs once, uninterrupted, on a fresh install (no
+existing `config.json` to protect).
 
 ## Testing
 
@@ -375,16 +551,32 @@ install (no existing `config.json` to protect).
 - `tests/test_menu.py`: `tools_menu()` row visibility per `cfg.tools_visible`
   (mirroring the existing provider-visibility tests), `ip_info_menu()`
   rebuilt for N mocked findings instead of 2 hardcoded dicts,
-  `subdomain_search_menu()` happy path + no-results + network-failure.
+  `subdomain_search_menu()` happy path + no-results + network-failure,
+  `refresh_all_menu()` spawns both subprocesses unconditionally (mocked
+  `Popen`, assert called regardless of cache freshness — the whole point
+  is bypassing the staleness gate), `clear_caches_menu()` against a
+  `tmp_path` standing in for the cache dir (asserts it only touches
+  `*.json` there, leaves an unrelated file alone), `speed_test_menu()`
+  with `speedtest.measure` mocked (happy path + `None`/network-failure).
+- `tests/test_speedtest.py` (new): `measure()` against a mocked `urlopen`
+  (known byte count + controlled elapsed time via a monkeypatched
+  `time.perf_counter` → exact expected MB/s; failure returns `None`).
+- `tests/test_crtname.py` (new): `search()` against a mocked `urlopen`
+  (happy path parses `{"sub": ...}` entries into a flat list; failure and
+  malformed-JSON both return `None`).
 - `tests/test_config.py`: `ip_sources`/`tools_visible` round-trip
   (load/save), including a keyed source's `api_key` surviving a save/load
   cycle and an old config file (missing these keys entirely) still loading
   with the documented defaults.
-- No test for `run_configure_wizard()`'s interactive `input()` loop beyond
-  a thin smoke test (monkeypatch `builtins.input` to feed canned answers,
-  assert the resulting `Config` matches) — the existing `make install`
-  itself is never executed by the test suite (it's a real system installer,
-  same as today).
+- `tests/test_configure_wizard.py` (new): `run_configure_wizard()` against
+  a fake in-memory `Prompter` (canned `confirm`/`text` answers fed in
+  order) — asserts the resulting `Config` matches, and that an existing
+  `config.json` is left untouched when the reconfigure gate answers no.
+  `TerminalPrompter`/`WalkerPrompter` each get one thin test of their own
+  (`confirm`/`text` map to `input()` / `walker_select()`/`walker_input()`
+  correctly) — the wizard's *logic* is tested once, against the fake,
+  not duplicated per front-end. `make install` itself is still never
+  executed by the test suite (real system installer, same as today).
 
 ## Migration / rollout notes
 
