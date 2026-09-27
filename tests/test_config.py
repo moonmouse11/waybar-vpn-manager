@@ -61,3 +61,42 @@ def test_happ_gui_fallback_roundtrip(tmp_path, monkeypatch):
     cfg.happ_gui_fallback = True
     save_config(cfg)
     assert load_config().happ_gui_fallback is True
+
+
+def test_ip_sources_and_tools_visible_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = load_config()
+    assert cfg.ip_sources == {}
+    assert cfg.tool_visible("anything") is True  # default: visible
+
+
+def test_ip_sources_roundtrip_with_api_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = Config()
+    cfg.ip_sources["abuseipdb"] = {"api_key": "secret-123"}
+    cfg.tools_visible["dns_leak_test"] = False
+    save_config(cfg)
+
+    loaded = load_config()
+    assert loaded.ip_sources["abuseipdb"]["api_key"] == "secret-123"
+    assert loaded.tool_visible("dns_leak_test") is False
+    assert loaded.tool_visible("ip_info") is True  # untouched key still defaults on
+
+
+def test_old_config_without_new_keys_still_loads(tmp_path, monkeypatch):
+    p = tmp_path / "config.json"
+    p.write_text('{"killswitch_mode": "happ"}')
+    monkeypatch.setattr(config, "CONFIG_PATH", p)
+    cfg = load_config()
+    assert cfg.killswitch_mode == "happ"
+    assert cfg.ip_sources == {}
+    assert cfg.tools_visible == {}
+
+
+def test_malformed_ip_sources_and_tools_visible_ignored(tmp_path, monkeypatch):
+    p = tmp_path / "config.json"
+    p.write_text('{"ip_sources": "nope", "tools_visible": ["also nope"]}')
+    monkeypatch.setattr(config, "CONFIG_PATH", p)
+    cfg = load_config()
+    assert cfg.ip_sources == {}
+    assert cfg.tools_visible == {}
