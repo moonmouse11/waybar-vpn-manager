@@ -1,5 +1,7 @@
 import ipsources.base as base
+from ipsources.abuseipdb import AbuseIPDBSource
 from ipsources.ipapi import IpApiSource
+from ipsources.ipqualityscore import IPQualityScoreSource
 from ipsources.ipwhois import IpWhoIsSource
 
 
@@ -154,3 +156,99 @@ def test_ipapi_lookup_happy_path(monkeypatch):
 def test_ipapi_lookup_returns_none_when_status_not_success(monkeypatch):
     monkeypatch.setattr(base, "fetch_json", lambda url, **kw: {"status": "fail"})
     assert IpApiSource().lookup("1.2.3.4") is None
+
+
+def test_abuseipdb_lookup_without_key_returns_none(monkeypatch, tmp_path):
+    import config
+
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+
+    def boom(url, **kw):
+        raise AssertionError("must not call the network without a key")
+
+    monkeypatch.setattr(base, "fetch_json", boom)
+    assert AbuseIPDBSource().lookup("1.2.3.4") is None
+
+
+def test_abuseipdb_lookup_happy_path(monkeypatch, tmp_path):
+    import config
+
+    p = tmp_path / "config.json"
+    monkeypatch.setattr(config, "CONFIG_PATH", p)
+    cfg = config.Config()
+    cfg.ip_sources["abuseipdb"] = {"api_key": "secret"}
+    config.save_config(cfg)
+
+    captured = {}
+
+    def fake_fetch_json(url, headers=None, **kw):
+        captured["url"] = url
+        captured["headers"] = headers
+        return {
+            "data": {
+                "countryCode": "RU",
+                "isp": "Some Hosting Co",
+                "usageType": "Data Center/Web Hosting/Transit",
+                "abuseConfidenceScore": 42,
+            }
+        }
+
+    monkeypatch.setattr(base, "fetch_json", fake_fetch_json)
+    finding = AbuseIPDBSource().lookup("1.2.3.4")
+    assert finding.source == "AbuseIPDB"
+    assert finding.country_code == "RU"
+    assert finding.hosting is True
+    assert finding.abuse_score == 42
+    assert captured["headers"]["Key"] == "secret"
+    assert "1.2.3.4" in captured["url"]
+
+
+def test_ipqualityscore_lookup_without_key_returns_none(monkeypatch, tmp_path):
+    import config
+
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+
+    def boom(url, **kw):
+        raise AssertionError("must not call the network without a key")
+
+    monkeypatch.setattr(base, "fetch_json", boom)
+    assert IPQualityScoreSource().lookup("1.2.3.4") is None
+
+
+def test_ipqualityscore_lookup_happy_path(monkeypatch, tmp_path):
+    import config
+
+    p = tmp_path / "config.json"
+    monkeypatch.setattr(config, "CONFIG_PATH", p)
+    cfg = config.Config()
+    cfg.ip_sources["ipqualityscore"] = {"api_key": "secret"}
+    config.save_config(cfg)
+
+    captured = {}
+
+    def fake_fetch_json(url, **kw):
+        captured["url"] = url
+        return {
+            "success": True,
+            "country_code": "RU",
+            "ISP": "Some Proxy Provider",
+            "proxy": True,
+            "vpn": False,
+            "tor": False,
+            "mobile": False,
+            "fraud_score": 77,
+        }
+
+    monkeypatch.setattr(base, "fetch_json", fake_fetch_json)
+    finding = IPQualityScoreSource().lookup("1.2.3.4")
+    assert finding.source == "IPQualityScore"
+    assert finding.proxy is True
+    assert finding.abuse_score == 77
+    assert "secret" in captured["url"]
+
+
+def test_all_sources_registry_has_all_four():
+    import ipsources
+
+    names = {s.name for s in ipsources.ALL_SOURCES}
+    assert names == {"ipwho.is", "ip-api.com", "AbuseIPDB", "IPQualityScore"}
