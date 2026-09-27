@@ -527,6 +527,28 @@ def test_walker_timeout_restarts_service(monkeypatch):
     assert any("pkill" in str(c) and "-9" in c for c in ran)  # SIGKILL on the service
 
 
+def test_walker_select_passes_width_flags(monkeypatch):
+    """Regression: the default theme's window is too narrow for our longer
+    labels (DNS leak test / server + ASN info), which walker truncates with
+    no wrapping — must always ask for a wider window."""
+    captured = {}
+
+    class R:
+        stdout = "a\n"
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return R()
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", fake_run)
+    vpn_manager.walker_select(["a", "b"])
+    cmd = captured["cmd"]
+    assert "--width" in cmd
+    assert cmd[cmd.index("--width") + 1] == str(vpn_manager.WALKER_WIDTH)
+    assert "--maxwidth" in cmd
+    assert cmd[cmd.index("--maxwidth") + 1] == str(vpn_manager.WALKER_MAXWIDTH)
+
+
 def test_level1_layout_connected(monkeypatch):
     """Menu order: current connection (first, with metrics) → providers →
     quick disconnect, killswitch ALWAYS the last row."""
@@ -706,6 +728,126 @@ def test_menu_loop_hides_empty_keys_by_default(monkeypatch):
     vpn_manager.menu_loop()
     assert not any(o.startswith("VLESS") for o in seen[0])
     assert seen[0][-1].strip().startswith("Killswitch")
+
+
+def test_menu_loop_always_shows_dns_leak_test_and_ip_info_rows(monkeypatch):
+    """Present even with nothing configured/active, right before killswitch."""
+    patch_menu_env(monkeypatch, [], picks=[])
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.menu_loop()
+    assert "🔍 DNS Leak Test" in seen[0]
+    assert "ℹ️ IP Info" in seen[0]
+    assert seen[0][-1].strip().startswith("Killswitch")
+    assert seen[0][-3:-1] == ["🔍 DNS Leak Test", "ℹ️ IP Info"]
+
+
+def test_dns_leak_server_row_flags_suspicious():
+    row = vpn_manager._dns_leak_server_row(
+        {"ip": "172.69.50.15", "country": "ru", "org": "CloudFlare Inc"}
+    )
+    label = row[0]
+    assert label.startswith("🇷🇺 172.69.50.15 · CloudFlare Inc")
+    assert "⚠RU" in label
+
+
+def test_dns_leak_server_row_clean_no_warning():
+    row = vpn_manager._dns_leak_server_row({"ip": "9.9.9.9", "country": "de", "org": "Quad9"})
+    label = row[0]
+    assert label == "🇩🇪 9.9.9.9 · Quad9"
+    assert "⚠RU" not in label
+
+
+def test_dns_leak_server_row_falls_back_to_asn_without_org():
+    row = vpn_manager._dns_leak_server_row(
+        {"ip": "1.1.1.1", "country": "au", "asn": "AS13335 CloudFlare Inc"}
+    )
+    assert "AS13335 CloudFlare Inc" in row[0]
+
+
+def test_dns_leak_test_menu_builds_result_rows(monkeypatch):
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    monkeypatch.setattr(
+        vpn_manager.dnsleak,
+        "run",
+        lambda: {
+            "ip": "1.2.3.4",
+            "ip_country": "DE",
+            "dns_servers": [
+                {"ip": "172.69.50.15", "country": "ru", "org": "CloudFlare Inc"},
+                {"ip": "9.9.9.9", "country": "de", "org": "Quad9"},
+            ],
+            "conclusion": "DNS may be leaking.",
+        },
+    )
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    result = vpn_manager.dns_leak_test_menu()
+    assert result.success
+    rows = seen[0]
+    assert rows[0] == "IP: 1.2.3.4 🇩🇪"
+    assert any("CloudFlare Inc" in r and "⚠RU" in r for r in rows)
+    assert any("Quad9" in r and "⚠RU" not in r for r in rows)
+    assert any("DNS may be leaking." in r for r in rows)
+    assert rows[-1] == "‹ Back"
+
+
+def test_dns_leak_test_menu_handles_network_failure(monkeypatch):
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager.dnsleak, "run", lambda: None)
+    result = vpn_manager.dns_leak_test_menu()
+    assert not result.success
+
+
+def test_ip_info_menu_builds_rows(monkeypatch):
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    monkeypatch.setattr(
+        vpn_manager.reputation,
+        "lookup_self",
+        lambda: {
+            "ip": "1.2.3.4",
+            "ipwho_country": "Germany",
+            "ipwho_org": "jogcorp",
+            "ipapi_country": "France",
+            "ipapi_isp": "SMARTNET Germany GmbH",
+            "hosting": True,
+            "proxy": False,
+            "mobile": False,
+        },
+    )
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    result = vpn_manager.ip_info_menu()
+    assert result.success
+    rows = seen[0]
+    assert rows[0] == "IP: 1.2.3.4"
+    assert "ipwho.is: Germany · jogcorp" in rows
+    assert "ip-api.com: France · SMARTNET Germany GmbH" in rows
+    assert "🏢 Datacenter/Hosting: Yes" in rows
+    assert "🕵 Proxy/VPN detected: No" in rows
+    assert "📱 Mobile network: No" in rows
+    assert rows[-1] == "‹ Back"
+
+
+def test_ip_info_menu_handles_network_failure(monkeypatch):
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda: None)
+    result = vpn_manager.ip_info_menu()
+    assert not result.success
 
 
 def test_killswitch_item_toggle_gathers_targets(monkeypatch, tmp_path):

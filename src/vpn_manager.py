@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import config
+import dnsleak
 import happmeta
 import ipinfo
 import ipv6guard
@@ -299,6 +300,88 @@ def _killswitch_item() -> tuple[str, callable]:
     return ("  Killswitch: OFF — click to enable (all)", lambda: _killswitch_toggle(True))
 
 
+def _dns_leak_verdict_icon(conclusion: str) -> str:
+    c = conclusion.lower()
+    if "may be leaking" in c or "leak detected" in c:
+        return "⚠️ "
+    if "not leaking" in c or "no leak" in c:
+        return "✅ "
+    return ""
+
+
+def _dns_leak_server_row(server: dict) -> tuple[str, callable]:
+    """One row per detected resolver — the wider walker window (see
+    WALKER_WIDTH) is the actual fix for these getting truncated; no need to
+    collapse the list to make it fit."""
+    flag = ipinfo.flag_emoji((server.get("country") or "").upper())
+    org = server.get("org") or server.get("asn") or ""
+    label = f"{flag} {server.get('ip') or '?'}".strip()
+    if org:
+        label += f" · {org}"
+    if reputation.is_suspicious({"country_code": (server.get("country") or "").upper()}):
+        label += "  ⚠RU"
+    return (label, lambda: ActionResult(True, ""))
+
+
+def dns_leak_test_menu() -> ActionResult:
+    """DNS leak test — same backend (bash.ws) as dnsleaktest.com. Runs
+    synchronously (a few seconds of DNS probes) and shows the result as a
+    submenu rather than a single notification, so a long DNS-server list
+    stays readable instead of getting truncated in a notify-send bubble."""
+    notify("DNS Leak Test", "Проверка запущена, это займёт несколько секунд…")
+    result = dnsleak.run()
+    if result is None:
+        return ActionResult(False, "Не удалось выполнить проверку — нет сети?")
+
+    items: list[tuple[str, callable]] = []
+    if result["ip"]:
+        flag = ipinfo.flag_emoji(result["ip_country"])
+        items.append((f"IP: {result['ip']} {flag}".strip(), lambda: ActionResult(True, "")))
+    if result["dns_servers"]:
+        items.extend(_dns_leak_server_row(s) for s in result["dns_servers"])
+    else:
+        items.append(("No DNS servers found", lambda: ActionResult(True, "")))
+    if result["conclusion"]:
+        icon = _dns_leak_verdict_icon(result["conclusion"])
+        items.append((f"{icon}{result['conclusion']}", lambda: ActionResult(True, "")))
+    items.append(("‹ Back", back_to_main))
+    run_items(_unique_labels(items), prompt="DNS Leak Test")
+    return ActionResult(True, "")
+
+
+def _ip_info_flag_row(label: str, value: bool | None) -> tuple[str, callable]:
+    text = "Yes" if value else "No"
+    return (f"{label}: {text}", lambda: ActionResult(True, ""))
+
+
+def ip_info_menu() -> ActionResult:
+    """Multi-source exit-IP report (ipwho.is + ip-api.com) — the free,
+    keyless equivalent of what a paid checker like checkip.com shows for
+    DataCenter/Residential/Proxy classification, via ip-api.com's
+    hosting/proxy/mobile flags. A single ad-hoc lookup for the current
+    public IP, not the background reputation sweep."""
+    notify("IP Info", "Проверка запущена, это займёт несколько секунд…")
+    result = reputation.lookup_self()
+    if result is None:
+        return ActionResult(False, "Не удалось получить информацию об IP — нет сети?")
+
+    items: list[tuple[str, callable]] = []
+    if result["ip"]:
+        items.append((f"IP: {result['ip']}", lambda: ActionResult(True, "")))
+    ipwho_parts = [p for p in (result["ipwho_country"], result["ipwho_org"]) if p]
+    if ipwho_parts:
+        items.append((f"ipwho.is: {' · '.join(ipwho_parts)}", lambda: ActionResult(True, "")))
+    ipapi_parts = [p for p in (result["ipapi_country"], result["ipapi_isp"]) if p]
+    if ipapi_parts:
+        items.append((f"ip-api.com: {' · '.join(ipapi_parts)}", lambda: ActionResult(True, "")))
+    items.append(_ip_info_flag_row("🏢 Datacenter/Hosting", result.get("hosting")))
+    items.append(_ip_info_flag_row("🕵 Proxy/VPN detected", result.get("proxy")))
+    items.append(_ip_info_flag_row("📱 Mobile network", result.get("mobile")))
+    items.append(("‹ Back", back_to_main))
+    run_items(_unique_labels(items), prompt="IP Info")
+    return ActionResult(True, "")
+
+
 def provider_actions(provider) -> list[tuple[str, callable]]:
     """Import / manage entries for providers that support them."""
     if provider.name in ("WireGuard", "AmneziaWG"):
@@ -371,6 +454,8 @@ def menu_loop() -> ActionResult:
         else:
             items.append((f"Disconnect ALL  ({len(all_active)})", disconnect_all))
 
+    items.append(("🔍 DNS Leak Test", dns_leak_test_menu))
+    items.append(("ℹ️ IP Info", ip_info_menu))
     items.append(_killswitch_item())  # always the last row
     return run_items(items, prompt="VPN")
 
@@ -642,12 +727,27 @@ def run_items(items: list[tuple[str, callable]], prompt: str) -> ActionResult:
 
 
 WALKER_TIMEOUT = 120  # seconds — a wedged walker service must not hang the menu forever
+# The default theme's window is 644px — comfortably wide labels here (DNS
+# leak test / server names + ASN info) get truncated with no wrapping.
+# Long-form flags only: walker's own --help warns the -w/-h shorthand
+# clashes with GOption parsing ("DONT USE SHORTHAND").
+WALKER_WIDTH = 900
+WALKER_MAXWIDTH = 860  # content area, a bit narrower than the box for padding
 
 
 def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
     try:
         result = subprocess.run(
-            ["walker", "-d", "-p", prompt],
+            [
+                "walker",
+                "-d",
+                "-p",
+                prompt,
+                "--width",
+                str(WALKER_WIDTH),
+                "--maxwidth",
+                str(WALKER_MAXWIDTH),
+            ],
             input="\n".join(options),
             capture_output=True,
             text=True,
@@ -680,7 +780,17 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
 def import_config_file(provider, title: str) -> ActionResult:
     try:
         result = subprocess.run(
-            ["walker", "-d", "-I", "-p", f"{title} config path"],
+            [
+                "walker",
+                "-d",
+                "-I",
+                "-p",
+                f"{title} config path",
+                "--width",
+                str(WALKER_WIDTH),
+                "--maxwidth",
+                str(WALKER_MAXWIDTH),
+            ],
             capture_output=True,
             text=True,
         )

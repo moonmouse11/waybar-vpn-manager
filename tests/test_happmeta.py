@@ -321,6 +321,57 @@ def test_all_servers_status_path_never_fetches(tmp_path, monkeypatch):
     assert [s["name"] for s in servers] == ["S"]
 
 
+def _vless_outbound(host, port):
+    return {
+        "protocol": "vless",
+        "settings": {"vnext": [{"address": host, "port": port}]},
+        "streamSettings": {"network": "tcp", "security": "reality"},
+    }
+
+
+def test_all_servers_hides_captured_dupe_at_same_address(tmp_path, monkeypatch):
+    """A subscription can rename/re-decorate a server's remarks while the
+    underlying server stays put — the stale capture under the OLD name must
+    not appear as a spurious 'no provider' duplicate of the very same
+    server, now correctly listed under its subscription. Matched by
+    (host, port), not name, since renames change the name by definition."""
+    sub_server = {
+        "remarks": "🇩🇪 Germany 4 - Gemini",
+        "outbounds": [_vless_outbound("1.2.3.4", 8443)],
+    }
+    _fake_providers(monkeypatch, tmp_path, {"1": {"name": "ProvA", "url": "https://x/1"}})
+    monkeypatch.setattr(happmeta, "fetch_subscription", lambda sub_id, url: [sub_server])
+
+    captured = {
+        # same address as the subscription entry, old undecorated name -> hide
+        "Germany 4 - Gemini": {"outbounds": [_vless_outbound("1.2.3.4", 8443)]},
+        # different address entirely -> a genuinely separate server, keep
+        "Some Other Live Server": {"outbounds": [_vless_outbound("5.6.7.8", 8443)]},
+    }
+    configs = tmp_path / "xray-configs.json"
+    configs.write_text(json.dumps(captured, ensure_ascii=False))
+    monkeypatch.setattr(happmeta, "XRAY_CONFIGS", configs)
+
+    servers = happmeta.all_servers()
+    names = {s["name"] for s in servers}
+    assert names == {"🇩🇪 Germany 4 - Gemini", "Some Other Live Server"}
+    misc = [s for s in servers if s["provider_name"] == "Прочие / без провайдера"]
+    assert [s["name"] for s in misc] == ["Some Other Live Server"]
+
+
+def test_all_servers_keeps_captured_entry_with_unparseable_address(tmp_path, monkeypatch):
+    """A capture whose own outbound can't be parsed must fall back to the
+    name-only check rather than being silently (and wrongly) hidden."""
+    _fake_providers(monkeypatch, tmp_path, {"1": {"name": "ProvA", "url": "https://x/1"}})
+    monkeypatch.setattr(happmeta, "fetch_subscription", lambda sub_id, url: [])
+    configs = tmp_path / "xray-configs.json"
+    configs.write_text(json.dumps({"Weird": {"outbounds": []}}))
+    monkeypatch.setattr(happmeta, "XRAY_CONFIGS", configs)
+
+    servers = happmeta.all_servers()
+    assert [s["name"] for s in servers] == ["Weird"]
+
+
 def test_request_subscription_update_spawns_when_stale(tmp_path, monkeypatch):
     _fake_providers(monkeypatch, tmp_path, {"1": {"name": "P", "url": "https://x/1"}})
     monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)

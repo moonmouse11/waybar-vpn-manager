@@ -508,18 +508,32 @@ def all_servers(allow_fetch: bool = True) -> list[dict]:
                     "config": cfg,
                 }
             )
-    # Captured servers missing from every subscription (e.g. old captures)
-    known = {s["name"] for s in servers}
-    for name in _configs():
-        if name not in known:
-            servers.append(
-                {
-                    "name": name,
-                    "provider_id": "",
-                    "provider_name": "Прочие / без провайдера",
-                    "config": _configs()[name],
-                }
-            )
+    # Captured servers missing from every subscription (e.g. old captures).
+    # Matched by address (host, port), not name: a subscription can rename
+    # or rotate a server onto a new address under the same display name,
+    # which would otherwise leave the old capture looking like a distinct,
+    # provider-less duplicate of a server that's actually still around
+    # (see CLAUDE.md's "Прочие / без провайдера" notes) — a capture whose
+    # own address can't be parsed falls back to the name-only check so it
+    # is never wrongly hidden.
+    known_names = {s["name"] for s in servers}
+    known_targets = {
+        target for s in servers if (target := _outbound_target(s["config"])) is not None
+    }
+    for name, cfg in _configs().items():
+        if name in known_names:
+            continue
+        target = _outbound_target(cfg)
+        if target is not None and target in known_targets:
+            continue
+        servers.append(
+            {
+                "name": name,
+                "provider_id": "",
+                "provider_name": "Прочие / без провайдера",
+                "config": cfg,
+            }
+        )
     return servers
 
 
@@ -549,23 +563,23 @@ def resolve_config(name: str, allow_fetch: bool = True) -> dict | None:
 # ── Server params / labels ────────────────────────────────────────────────────
 
 
-def server_params(name: str, allow_fetch: bool = True) -> dict | None:
-    """{host, port, protocol, network, security} for a server."""
-    cfg = resolve_config(name, allow_fetch=allow_fetch)
-    if not cfg:
+def _real_outbound(cfg: dict) -> dict | None:
+    """The server outbound (vless preferred; trojan/shadowsocks fall back to
+    the first non-dns/freedom outbound), or None."""
+    outbounds = cfg.get("outbounds") or []
+    return next((o for o in outbounds if o.get("protocol") == "vless"), None) or next(
+        (o for o in outbounds if o.get("protocol") not in ("dns", "freedom")), None
+    )
+
+
+def _outbound_target(cfg: dict) -> tuple[str, int] | None:
+    """(host, port) of a raw xray config's real server outbound, or None —
+    the address identity that actually distinguishes one server from
+    another, independent of its display name (see all_servers())."""
+    outbound = _real_outbound(cfg)
+    if outbound is None:
         return None
     try:
-        # vless preferred; trojan/shadowsocks fall back to the first real
-        # server outbound so every protocol keeps its ping + label info
-        outbound = next(
-            (o for o in cfg["outbounds"] if o.get("protocol") == "vless"),
-            None,
-        ) or next(
-            (o for o in cfg["outbounds"] if o.get("protocol") not in ("dns", "freedom")),
-            None,
-        )
-        if outbound is None:
-            return None
         settings = outbound.get("settings", {})
         if "vnext" in settings:  # vless / vmess
             target = settings["vnext"][0]
@@ -573,10 +587,27 @@ def server_params(name: str, allow_fetch: bool = True) -> dict | None:
             target = settings["servers"][0]
         else:
             return None
-        stream = outbound.get("streamSettings", {})
+        return (target["address"], target["port"])
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def server_params(name: str, allow_fetch: bool = True) -> dict | None:
+    """{host, port, protocol, network, security} for a server."""
+    cfg = resolve_config(name, allow_fetch=allow_fetch)
+    if not cfg:
+        return None
+    outbound = _real_outbound(cfg)
+    if outbound is None:
+        return None
+    target = _outbound_target(cfg)
+    if target is None:
+        return None
+    stream = outbound.get("streamSettings", {})
+    try:
         return {
-            "host": target["address"],
-            "port": target["port"],
+            "host": target[0],
+            "port": target[1],
             "protocol": outbound["protocol"],
             "network": stream.get("network", "tcp"),
             "security": stream.get("security", ""),
