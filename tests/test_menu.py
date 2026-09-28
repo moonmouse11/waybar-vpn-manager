@@ -1,5 +1,6 @@
 import config
 import vpn_manager
+from ipsources.base import IPFinding
 from providers.base import ActionResult, VPNConnection
 
 
@@ -811,20 +812,19 @@ def test_dns_leak_test_menu_handles_network_failure(monkeypatch):
 def test_ip_info_menu_builds_rows(monkeypatch):
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
-    monkeypatch.setattr(
-        vpn_manager.reputation,
-        "lookup_self",
-        lambda: {
-            "ip": "1.2.3.4",
-            "ipwho_country": "Germany",
-            "ipwho_org": "jogcorp",
-            "ipapi_country": "France",
-            "ipapi_isp": "SMARTNET Germany GmbH",
-            "hosting": True,
-            "proxy": False,
-            "mobile": False,
-        },
-    )
+    findings = [
+        IPFinding(source="ipwho.is", ip="1.2.3.4", country_name="Germany", org="jogcorp"),
+        IPFinding(
+            source="ip-api.com",
+            ip="1.2.3.4",
+            country_name="France",
+            org="SMARTNET Germany GmbH",
+            hosting=True,
+            proxy=False,
+            mobile=False,
+        ),
+    ]
+    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda include_keyed=True: findings)
     seen = []
     monkeypatch.setattr(
         vpn_manager,
@@ -843,9 +843,9 @@ def test_ip_info_menu_builds_rows(monkeypatch):
     assert rows[-1] == "‹ Back"
 
 
-def test_ip_info_menu_handles_network_failure(monkeypatch):
+def test_ip_info_menu_handles_no_findings(monkeypatch):
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda: None)
+    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda include_keyed=True: [])
     result = vpn_manager.ip_info_menu()
     assert not result.success
 

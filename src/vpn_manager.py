@@ -355,28 +355,23 @@ def _ip_info_flag_row(label: str, value: bool | None) -> tuple[str, callable]:
 
 
 def ip_info_menu() -> ActionResult:
-    """Multi-source exit-IP report (ipwho.is + ip-api.com) — the free,
-    keyless equivalent of what a paid checker like checkip.com shows for
-    DataCenter/Residential/Proxy classification, via ip-api.com's
-    hosting/proxy/mobile flags. A single ad-hoc lookup for the current
-    public IP, not the background reputation sweep."""
+    """Multi-source exit-IP report — one row group per enabled ipsources
+    source (free ones on by default; keyed ones once their API key is
+    set). A single ad-hoc lookup for the current public IP, not the
+    background reputation sweep."""
     notify("IP Info", "Проверка запущена, это займёт несколько секунд…")
-    result = reputation.lookup_self()
-    if result is None:
+    findings = reputation.lookup_self(include_keyed=True)
+    if not findings:
         return ActionResult(False, "Не удалось получить информацию об IP — нет сети?")
 
-    items: list[tuple[str, callable]] = []
-    if result["ip"]:
-        items.append((f"IP: {result['ip']}", lambda: ActionResult(True, "")))
-    ipwho_parts = [p for p in (result["ipwho_country"], result["ipwho_org"]) if p]
-    if ipwho_parts:
-        items.append((f"ipwho.is: {' · '.join(ipwho_parts)}", lambda: ActionResult(True, "")))
-    ipapi_parts = [p for p in (result["ipapi_country"], result["ipapi_isp"]) if p]
-    if ipapi_parts:
-        items.append((f"ip-api.com: {' · '.join(ipapi_parts)}", lambda: ActionResult(True, "")))
-    items.append(_ip_info_flag_row("🏢 Datacenter/Hosting", result.get("hosting")))
-    items.append(_ip_info_flag_row("🕵 Proxy/VPN detected", result.get("proxy")))
-    items.append(_ip_info_flag_row("📱 Mobile network", result.get("mobile")))
+    items: list[tuple[str, callable]] = [(f"IP: {findings[0].ip}", lambda: ActionResult(True, ""))]
+    for finding in findings:
+        parts = [p for p in (finding.country_name, finding.org) if p]
+        label = f"{finding.source}: {' · '.join(parts)}" if parts else finding.source
+        items.append((label, lambda: ActionResult(True, "")))
+    items.append(_ip_info_flag_row("🏢 Datacenter/Hosting", any(f.hosting for f in findings)))
+    items.append(_ip_info_flag_row("🕵 Proxy/VPN detected", any(f.proxy for f in findings)))
+    items.append(_ip_info_flag_row("📱 Mobile network", any(f.mobile for f in findings)))
     items.append(("‹ Back", back_to_main))
     run_items(_unique_labels(items), prompt="IP Info")
     return ActionResult(True, "")
