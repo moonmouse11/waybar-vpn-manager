@@ -777,7 +777,9 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
     return selected if selected else None
 
 
-def import_config_file(provider, title: str) -> ActionResult:
+def walker_input(prompt: str) -> str | None:
+    """Single-field text input via walker (-I, dmenu-only), same widened
+    window as walker_select(). None on any failure or empty input."""
     try:
         result = subprocess.run(
             [
@@ -785,7 +787,7 @@ def import_config_file(provider, title: str) -> ActionResult:
                 "-d",
                 "-I",
                 "-p",
-                f"{title} config path",
+                prompt,
                 "--width",
                 str(WALKER_WIDTH),
                 "--maxwidth",
@@ -794,11 +796,15 @@ def import_config_file(provider, title: str) -> ActionResult:
             capture_output=True,
             text=True,
         )
-        path = result.stdout.strip()
     except FileNotFoundError:
         notify("Error", "walker not found", urgent=True)
-        return ActionResult(success=False, message="walker not found")
+        return None
+    text = result.stdout.strip()
+    return text or None
 
+
+def import_config_file(provider, title: str) -> ActionResult:
+    path = walker_input(f"{title} config path")
     if not path:
         return ActionResult(success=False, message="No path entered")
     return provider.import_config(path)

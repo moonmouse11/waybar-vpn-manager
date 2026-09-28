@@ -980,3 +980,44 @@ def test_happ_provider_menu_no_info_entry_without_record(monkeypatch):
     )
     vpn_manager.happ_provider_menu(provider, "P", entries)
     assert seen[0] == ["s1", "‹ Back"]
+
+
+def test_walker_input_returns_stripped_text(monkeypatch):
+    class R:
+        stdout = "  /home/user/config.conf  \n"
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", lambda cmd, **k: R())
+    assert vpn_manager.walker_input("Path") == "/home/user/config.conf"
+
+
+def test_walker_input_returns_none_when_empty(monkeypatch):
+    class R:
+        stdout = "\n"
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", lambda cmd, **k: R())
+    assert vpn_manager.walker_input("Path") is None
+
+
+def test_walker_input_returns_none_when_walker_missing(monkeypatch):
+    def boom(cmd, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", boom)
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    assert vpn_manager.walker_input("Path") is None
+
+
+def test_walker_input_passes_width_flags(monkeypatch):
+    captured = {}
+
+    class R:
+        stdout = "x\n"
+
+    def fake_run(cmd, **k):
+        captured["cmd"] = cmd
+        return R()
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", fake_run)
+    vpn_manager.walker_input("Path")
+    cmd = captured["cmd"]
+    assert "--width" in cmd and cmd[cmd.index("--width") + 1] == str(vpn_manager.WALKER_WIDTH)
