@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import contextlib
+import getpass
 import json
 import subprocess
 import sys
@@ -349,7 +350,7 @@ def dns_leak_test_menu() -> ActionResult:
     if result["conclusion"]:
         icon = _dns_leak_verdict_icon(result["conclusion"])
         items.append((f"{icon}{result['conclusion']}", lambda: ActionResult(True, "")))
-    items.append(("‹ Back", back_to_main))
+    items.append(("‹ Back", tools_menu))
     run_items(_unique_labels(items), prompt="DNS Leak Test")
     return ActionResult(True, "")
 
@@ -372,12 +373,14 @@ def ip_info_menu() -> ActionResult:
     items: list[tuple[str, callable]] = [(f"IP: {findings[0].ip}", lambda: ActionResult(True, ""))]
     for finding in findings:
         parts = [p for p in (finding.country_name, finding.org) if p]
+        if finding.abuse_score is not None:
+            parts.append(f"abuse {finding.abuse_score}/100")
         label = f"{finding.source}: {' · '.join(parts)}" if parts else finding.source
         items.append((label, lambda: ActionResult(True, "")))
     items.append(_ip_info_flag_row("🏢 Datacenter/Hosting", any(f.hosting for f in findings)))
     items.append(_ip_info_flag_row("🕵 Proxy/VPN detected", any(f.proxy for f in findings)))
     items.append(_ip_info_flag_row("📱 Mobile network", any(f.mobile for f in findings)))
-    items.append(("‹ Back", back_to_main))
+    items.append(("‹ Back", tools_menu))
     run_items(_unique_labels(items), prompt="IP Info")
     return ActionResult(True, "")
 
@@ -394,7 +397,7 @@ def subdomain_search_menu() -> ActionResult:
     items = [(s, lambda: ActionResult(True, "")) for s in subs] or [
         ("No subdomains found", lambda: ActionResult(True, ""))
     ]
-    items.append(("‹ Back", back_to_main))
+    items.append(("‹ Back", tools_menu))
     run_items(_unique_labels(items), prompt=f"Subdomains: {domain}")
     return ActionResult(True, "")
 
@@ -461,11 +464,17 @@ class Prompter(ABC):
 class TerminalPrompter(Prompter):
     def confirm(self, question: str, default: bool) -> bool:
         suffix = "[Y/n]" if default else "[y/N]"
-        answer = input(f"{question} {suffix} ").strip().lower()
+        try:
+            answer = input(f"{question} {suffix} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return default
         return default if not answer else answer in ("y", "yes", "д", "да")
 
     def text(self, question: str) -> str:
-        return input(f"{question}: ").strip()
+        try:
+            return getpass.getpass(f"{question}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
 
 
 class WalkerPrompter(Prompter):

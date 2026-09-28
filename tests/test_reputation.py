@@ -217,14 +217,16 @@ def test_lookup_self_bounds_total_time_when_a_source_hangs(monkeypatch):
 
 
 def test_detect_own_ip_primary_source(monkeypatch):
+    # _detect_own_ip() now delegates to ipsources.base.fetch_json instead of
+    # a private, duplicated _get_json helper.
     monkeypatch.setattr(
-        reputation, "_get_json", lambda url: {"success": True, "ip": "1.2.3.4"}
+        reputation, "fetch_json", lambda url, timeout=6: {"success": True, "ip": "1.2.3.4"}
     )
     assert reputation._detect_own_ip() == "1.2.3.4"
 
 
 def test_detect_own_ip_falls_back_on_primary_failure(monkeypatch):
-    monkeypatch.setattr(reputation, "_get_json", lambda url: None)
+    monkeypatch.setattr(reputation, "fetch_json", lambda url, timeout=6: None)
 
     class _Resp:
         def read(self):

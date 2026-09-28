@@ -32,7 +32,9 @@ def test_terminal_prompter_confirm_explicit_answer(monkeypatch):
 
 
 def test_terminal_prompter_text_strips_input(monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda prompt: "  secret-key  ")
+    # text() now goes through getpass.getpass (not input()) so a typed API
+    # key doesn't echo to the terminal/scrollback.
+    monkeypatch.setattr(vpn_manager.getpass, "getpass", lambda prompt: "  secret-key  ")
     assert vpn_manager.TerminalPrompter().text("Key?") == "secret-key"
 
 

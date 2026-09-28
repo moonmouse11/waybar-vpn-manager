@@ -93,4 +93,5 @@ def save_config(cfg: Config) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(raw, indent=2) + "\n")
+    tmp.chmod(0o600)
     tmp.replace(CONFIG_PATH)

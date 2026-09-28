@@ -28,6 +28,14 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
   (`~/.config/vpn-manager/config.json`)
 - **NetworkManager provider** — shows/controls any VPN connection NM manages
   (openvpn, wireguard, vpnc, ikev2, openconnect, …)
+- **🛠 Tools submenu** — DNS Leak Test, IP Info, Subdomain Search, Speed Test,
+  Refresh All, Clear Caches, Settings and Killswitch, grouped off the main menu
+- **Pluggable IP sources** — multi-source exit-IP/reputation lookups (free
+  sources on by default; keyed sources like AbuseIPDB/IPQualityScore once an
+  API key is configured), managed from the same `~/.config/vpn-manager/config.json`
+- **Interactive setup wizard** — `--configure` (or the in-menu ⚙ Settings action)
+  walks through providers, tools and IP sources; runs automatically as the last
+  step of `make install`
 
 ## Requirements
 
@@ -67,6 +75,11 @@ The installer:
 4. Copies sources to `~/.config/waybar/vpn-manager/`, wrappers to `~/.config/waybar/scripts/`
 5. Inserts the `custom/vpn` module into `~/.config/waybar/config.jsonc` (skipped if present)
 6. Appends a `SUPER+Shift+V` binding to `~/.config/hypr/bindings.conf` (idempotent)
+7. Runs the interactive configuration wizard (`--configure`) — pick which providers,
+   tools and IP sources to show, and optionally set IP-source API keys; safe to
+   Ctrl-C or skip (e.g. non-interactive installs), re-run any time with:
+   `python3 ~/.config/waybar/vpn-manager/vpn_manager.py --configure`, or via the
+   in-menu ⚙ Settings action
 
 Then restart:
 
@@ -97,9 +110,17 @@ provider appear automatically.
 {
   "providers": {"outline": false},      // hide providers from menu/status
   "killswitch_mode": "happ",            // "off" | "happ" — auto-manage killswitch
-  "exit_ip": {"enabled": true, "max_age_seconds": 600}
+  "exit_ip": {"enabled": true, "max_age_seconds": 600},
+  "ip_sources": {                       // 🛠 Tools → IP Info source configuration
+    "abuseipdb": {"api_key": "..."},    // keyed sources: enabled by setting api_key
+    "ipwhois": {"enabled": true}        // free sources: enabled by default, opt-out here
+  },
+  "tools_visible": {"dns_leak_test": true, "killswitch": true}  // hide 🛠 Tools entries
 }
 ```
+
+Run the interactive wizard (`--configure`, or ⚙ Settings in the 🛠 Tools menu) instead of
+hand-editing `ip_sources`/`tools_visible` if you'd rather be walked through it.
 
 ## Killswitch
 

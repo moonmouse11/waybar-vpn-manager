@@ -26,7 +26,7 @@ import urllib.request
 from pathlib import Path
 
 import ipsources
-from ipsources.base import IPFinding
+from ipsources.base import IPFinding, fetch_json
 
 CACHE = Path.home() / ".cache/vpn-manager/reputation.json"
 MAX_AGE = 24 * 3600  # a day — registration data doesn't change hour to hour
@@ -72,20 +72,12 @@ def is_flagged(findings: list[IPFinding]) -> bool:
     return bool(combined_tags(findings))
 
 
-def _get_json(url: str) -> dict | None:
-    try:
-        with urllib.request.urlopen(url, timeout=6) as resp:
-            return json.loads(resp.read().decode())
-    except (OSError, ValueError):
-        return None
-
-
 def _detect_own_ip() -> str | None:
     """Bootstrap for lookup_self(): the same ipwho.is-then-ifconfig.me
     fallback chain ipinfo.py uses for its own exit-IP cache, duplicated
     here (not imported) — ipinfo.py already imports reputation for
     is_suspicious(), so importing ipinfo back would be circular."""
-    data = _get_json(IPWHO_API)
+    data = fetch_json(IPWHO_API, timeout=6)
     if data and data.get("success") and data.get("ip"):
         return data["ip"]
     try:
@@ -127,7 +119,7 @@ def lookup_host(host: str, include_keyed: bool) -> list[IPFinding]:
     worker = threading.Thread(target=_work, daemon=True)
     worker.start()
     worker.join(timeout=LOOKUP_TIMEOUT)
-    return result
+    return list(result)
 
 
 def lookup_self(include_keyed: bool = True) -> list[IPFinding]:
@@ -158,7 +150,7 @@ def lookup_self(include_keyed: bool = True) -> list[IPFinding]:
     worker = threading.Thread(target=_work, daemon=True)
     worker.start()
     worker.join(timeout=LOOKUP_TIMEOUT)
-    return findings
+    return list(findings)
 
 
 def _read() -> dict:

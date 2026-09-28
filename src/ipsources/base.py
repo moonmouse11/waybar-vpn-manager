@@ -18,9 +18,10 @@ def fetch_json(url: str, headers: dict | None = None, timeout: int = 8) -> dict 
     try:
         req = urllib.request.Request(url, headers=headers or {})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
     except (OSError, ValueError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 @dataclass
