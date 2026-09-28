@@ -13,7 +13,11 @@ class IpApiSource(base.IPInfoSource):
     name = "ip-api.com"
 
     def lookup(self, ip: str) -> base.IPFinding | None:
-        data = base.fetch_json(f"http://ip-api.com/json/{ip}?fields={FIELDS}")
+        # ip-api.com's free tier has no HTTPS endpoint at all (verified live —
+        # https://ip-api.com/json/... 403s without a paid key); only a public
+        # IP is sent, no credentials, so plaintext is the accepted tradeoff
+        # for staying keyless. See CLAUDE.md's reputation.py section.
+        data = base.fetch_json(f"http://ip-api.com/json/{ip}?fields={FIELDS}")  # NOSONAR
         if not data or data.get("status") != "success":
             return None
         return base.IPFinding(

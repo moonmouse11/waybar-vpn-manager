@@ -55,6 +55,7 @@ def active_connections(providers=None) -> list[VPNConnection]:
 
 
 NO_VPN = "direct"  # pseudo-connection key for the ipinfo cache when no VPN is up
+BACK_LABEL = "‹ Back"
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -349,7 +350,7 @@ def dns_leak_test_menu() -> ActionResult:
     if result["conclusion"]:
         icon = _dns_leak_verdict_icon(result["conclusion"])
         items.append((f"{icon}{result['conclusion']}", lambda: ActionResult(True, "")))
-    items.append(("‹ Back", tools_menu))
+    items.append((BACK_LABEL, tools_menu))
     run_items(_unique_labels(items), prompt="DNS Leak Test")
     return ActionResult(True, "")
 
@@ -379,7 +380,7 @@ def ip_info_menu() -> ActionResult:
     items.append(_ip_info_flag_row("🏢 Datacenter/Hosting", any(f.hosting for f in findings)))
     items.append(_ip_info_flag_row("🕵 Proxy/VPN detected", any(f.proxy for f in findings)))
     items.append(_ip_info_flag_row("📱 Mobile network", any(f.mobile for f in findings)))
-    items.append(("‹ Back", tools_menu))
+    items.append((BACK_LABEL, tools_menu))
     run_items(_unique_labels(items), prompt="IP Info")
     return ActionResult(True, "")
 
@@ -532,7 +533,7 @@ def tools_menu() -> ActionResult:
     items = [(label, fn) for key, label, fn in TOOLS if cfg.tool_visible(key)]
     if cfg.tool_visible("killswitch"):
         items.append(_killswitch_item())
-    items.append(("‹ Back", back_to_main))
+    items.append((BACK_LABEL, back_to_main))
     run_items(_unique_labels(items), prompt="Tools")
     return ActionResult(True, "")
 
@@ -705,7 +706,7 @@ def provider_menu(provider) -> ActionResult:
             label = f"{conn.name}{suffix}"
             items.append((label, lambda c=conn: guarded_connect(provider, c)))
     items.extend(provider_actions(provider))
-    items.append(("‹ Back", back_to_main))
+    items.append((BACK_LABEL, back_to_main))
     run_items(_unique_labels(items), prompt=provider.name)
     # The submenu already notified/refreshed; stay silent for the parent level.
     return ActionResult(True, "")
@@ -751,7 +752,7 @@ def happ_menu(provider) -> ActionResult:
             label += "  (" + " · ".join(suffixes) + ")"
         items.append((label, lambda p=pname, g=group: happ_provider_menu(provider, p, g)))
     items.append(("  Refresh subscriptions", _refresh_subscriptions))
-    items.append(("‹ Back", back_to_main))
+    items.append((BACK_LABEL, back_to_main))
     run_items(items, prompt="Happ")
 
 
@@ -816,7 +817,7 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
             items.append((label, lambda c=conn: guarded_disconnect(provider, c)))
         else:
             items.append((label, lambda c=conn: guarded_connect(provider, c)))
-    items.append(("‹ Back", lambda: happ_menu(provider)))
+    items.append((BACK_LABEL, lambda: happ_menu(provider)))
     run_items(_unique_labels(items), prompt=pname[:40])
     return ActionResult(True, "")
 
