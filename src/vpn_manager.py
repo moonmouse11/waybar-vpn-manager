@@ -468,14 +468,15 @@ class WalkerPrompter(Prompter):
         return walker_input(question) or ""
 
 
-def run_configure_wizard(prompter: Prompter) -> None:
+def run_configure_wizard(prompter: Prompter) -> bool:
     """The provider/tool/source walk shared by --configure (TerminalPrompter,
     install.sh's last step) and ⚙ Settings (WalkerPrompter, in-menu — no
     reinstall needed). Never touches an existing config.json unless the
-    user opts in via the first confirm."""
+    user opts in via the first confirm. Returns False when the user
+    declines reconfigure on an existing file; True after save."""
     if config.CONFIG_PATH.exists():
         if not prompter.confirm("Конфиг уже существует. Перенастроить?", False):
-            return
+            return False
         cfg = config.load_config()
     else:
         cfg = config.Config()
@@ -502,11 +503,14 @@ def run_configure_wizard(prompter: Prompter) -> None:
             cfg.ip_sources.setdefault(source.key, {})["enabled"] = enabled
 
     config.save_config(cfg)
+    return True
 
 
 def settings_menu() -> ActionResult:
-    run_configure_wizard(WalkerPrompter())
-    return ActionResult(True, "Настройки сохранены")
+    if run_configure_wizard(WalkerPrompter()):
+        return ActionResult(True, "Настройки сохранены")
+    # Declined reconfigure — not a failure; run_items() maps success=False to urgent errors.
+    return ActionResult(True, "Настройки без изменений")
 
 
 # single source of truth for both tools_menu()'s rows and the configure

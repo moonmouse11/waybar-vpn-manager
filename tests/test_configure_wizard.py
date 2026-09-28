@@ -57,9 +57,9 @@ def test_run_configure_wizard_writes_config_from_scratch(tmp_path, monkeypatch):
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [])  # keep the answer sequence short
     monkeypatch.setattr(vpn_manager.ipsources, "ALL_SOURCES", [])
 
-    # No providers, no sources -> only the TOOLS (7) + killswitch (1) confirms
-    prompter = FakePrompter(confirms=[True] * 8)
-    vpn_manager.run_configure_wizard(prompter)
+    # No providers, no sources -> 6 TOOLS rows + killswitch
+    prompter = FakePrompter(confirms=[True] * 7)  # 6 TOOLS rows + killswitch
+    assert vpn_manager.run_configure_wizard(prompter) is True
 
     loaded = config.load_config()
     assert loaded.tools_visible["dns_leak_test"] is True
@@ -73,7 +73,7 @@ def test_run_configure_wizard_respects_existing_config_refusal(tmp_path, monkeyp
     config.save_config(original)
 
     prompter = FakePrompter(confirms=[False])  # "reconfigure?" -> no
-    vpn_manager.run_configure_wizard(prompter)
+    assert vpn_manager.run_configure_wizard(prompter) is False
 
     assert config.load_config().killswitch_mode == "happ"  # untouched
 
@@ -92,8 +92,8 @@ def test_run_configure_wizard_collects_api_keys(tmp_path, monkeypatch):
     keyed = FakeSource("abuseipdb", "AbuseIPDB", True)
     monkeypatch.setattr(vpn_manager.ipsources, "ALL_SOURCES", [keyed])
 
-    prompter = FakePrompter(confirms=[True] * 8, texts=["secret-key-123"])
-    vpn_manager.run_configure_wizard(prompter)
+    prompter = FakePrompter(confirms=[True] * 7, texts=["secret-key-123"])
+    assert vpn_manager.run_configure_wizard(prompter) is True
 
     loaded = config.load_config()
     assert loaded.ip_sources["abuseipdb"]["api_key"] == "secret-key-123"
@@ -102,8 +102,17 @@ def test_run_configure_wizard_collects_api_keys(tmp_path, monkeypatch):
 def test_settings_menu_runs_wizard_with_walker_prompter(monkeypatch):
     called = {}
     monkeypatch.setattr(
-        vpn_manager, "run_configure_wizard", lambda prompter: called.update(kind=type(prompter))
+        vpn_manager,
+        "run_configure_wizard",
+        lambda prompter: called.update(kind=type(prompter)) or True,
     )
     result = vpn_manager.settings_menu()
     assert result.success
     assert called["kind"] is vpn_manager.WalkerPrompter
+
+
+def test_settings_menu_reports_no_op_when_wizard_declined(monkeypatch):
+    monkeypatch.setattr(vpn_manager, "run_configure_wizard", lambda prompter: False)
+    result = vpn_manager.settings_menu()
+    assert result.success is True
+    assert "без изменений" in result.message

@@ -1,6 +1,7 @@
 import json
 import time
 
+import config
 import reputation
 from ipsources.base import IPFinding
 
@@ -223,6 +224,35 @@ def test_detect_own_ip_primary_source(monkeypatch):
         reputation, "fetch_json", lambda url, timeout=6: {"success": True, "ip": "1.2.3.4"}
     )
     assert reputation._detect_own_ip() == "1.2.3.4"
+
+
+def test_detect_own_ip_skips_ipwho_when_source_disabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = config.Config()
+    cfg.ip_sources["ipwhois"] = {"enabled": False}
+    config.save_config(cfg)
+
+    calls = []
+
+    def fake_fetch(url, timeout=6):
+        calls.append(url)
+        return None
+
+    monkeypatch.setattr(reputation, "fetch_json", fake_fetch)
+
+    class _Resp:
+        def read(self):
+            return b"5.6.7.8\n"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(reputation.urllib.request, "urlopen", lambda url, timeout=6: _Resp())
+    assert reputation._detect_own_ip() == "5.6.7.8"
+    assert reputation.IPWHO_API not in calls
 
 
 def test_detect_own_ip_falls_back_on_primary_failure(monkeypatch):

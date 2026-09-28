@@ -72,14 +72,23 @@ def is_flagged(findings: list[IPFinding]) -> bool:
     return bool(combined_tags(findings))
 
 
+def _ipwho_bootstrap_enabled() -> bool:
+    for source in ipsources.ALL_SOURCES:
+        if source.key == "ipwhois":
+            return source.is_enabled()
+    return True
+
+
 def _detect_own_ip() -> str | None:
     """Bootstrap for lookup_self(): the same ipwho.is-then-ifconfig.me
     fallback chain ipinfo.py uses for its own exit-IP cache, duplicated
     here (not imported) — ipinfo.py already imports reputation for
-    is_suspicious(), so importing ipinfo back would be circular."""
-    data = fetch_json(IPWHO_API, timeout=6)
-    if data and data.get("success") and data.get("ip"):
-        return data["ip"]
+    is_suspicious(), so importing ipinfo back would be circular. Skips
+    ipwho.is when the user disabled ipwho.is in config."""
+    if _ipwho_bootstrap_enabled():
+        data = fetch_json(IPWHO_API, timeout=6)
+        if data and data.get("success") and data.get("ip"):
+            return data["ip"]
     try:
         with urllib.request.urlopen("https://ifconfig.me/ip", timeout=6) as resp:
             return resp.read().decode().strip()
