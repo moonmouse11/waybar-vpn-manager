@@ -11,6 +11,7 @@ import contextlib
 import json
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -20,6 +21,7 @@ import crtname
 import dnsleak
 import happmeta
 import ipinfo
+import ipsources
 import ipv6guard
 import killswitch
 import logutil
@@ -448,8 +450,72 @@ def clear_caches_menu() -> ActionResult:
     return ActionResult(True, f"Кэш очищен ({removed} файлов) — пересоберётся сам")
 
 
+class Prompter(ABC):
+    @abstractmethod
+    def confirm(self, question: str, default: bool) -> bool: ...
+
+    @abstractmethod
+    def text(self, question: str) -> str: ...
+
+
+class TerminalPrompter(Prompter):
+    def confirm(self, question: str, default: bool) -> bool:
+        suffix = "[Y/n]" if default else "[y/N]"
+        answer = input(f"{question} {suffix} ").strip().lower()
+        return default if not answer else answer in ("y", "yes", "д", "да")
+
+    def text(self, question: str) -> str:
+        return input(f"{question}: ").strip()
+
+
+class WalkerPrompter(Prompter):
+    def confirm(self, question: str, default: bool) -> bool:
+        selected = walker_select(["Да", "Нет"], prompt=question)
+        return (selected == "Да") if selected else default
+
+    def text(self, question: str) -> str:
+        return walker_input(question) or ""
+
+
+def run_configure_wizard(prompter: Prompter) -> None:
+    """The provider/tool/source walk shared by --configure (TerminalPrompter,
+    install.sh's last step) and ⚙ Settings (WalkerPrompter, in-menu — no
+    reinstall needed). Never touches an existing config.json unless the
+    user opts in via the first confirm."""
+    if config.CONFIG_PATH.exists():
+        if not prompter.confirm("Конфиг уже существует. Перенастроить?", False):
+            return
+        cfg = config.load_config()
+    else:
+        cfg = config.Config()
+
+    for provider in ALL_PROVIDERS:
+        visible = prompter.confirm(
+            f"Показывать {provider.name}?", cfg.provider_visible(provider.name)
+        )
+        cfg.providers[provider.name.lower()] = visible
+
+    for key, label, _fn in [*TOOLS, ("killswitch", "Killswitch", None)]:
+        visible = prompter.confirm(f"Показывать инструмент «{label}»?", cfg.tool_visible(key))
+        cfg.tools_visible[key] = visible
+
+    for source in ipsources.ALL_SOURCES:
+        if source.needs_api_key:
+            answer = prompter.text(
+                f"API-ключ {source.name} (Enter — оставить как есть/пропустить)"
+            )
+            if answer:
+                cfg.ip_sources.setdefault(source.key, {})["api_key"] = answer
+        else:
+            enabled = prompter.confirm(f"Использовать {source.name}?", source.is_enabled())
+            cfg.ip_sources.setdefault(source.key, {})["enabled"] = enabled
+
+    config.save_config(cfg)
+
+
 def settings_menu() -> ActionResult:
-    raise NotImplementedError  # implemented in Task 12
+    run_configure_wizard(WalkerPrompter())
+    return ActionResult(True, "Настройки сохранены")
 
 
 # single source of truth for both tools_menu()'s rows and the configure
@@ -980,6 +1046,11 @@ def main():
         action="store_true",
         help="Refresh server IP-reputation cache in the background (internal)",
     )
+    group.add_argument(
+        "--configure",
+        action="store_true",
+        help="Interactive setup wizard: providers, tools, IP sources/keys",
+    )
     args = parser.parse_args()
     if args.keys_keeper is not None and args.keys_keeper[0] not in ("ss", "vless"):
         kind = args.keys_keeper[0]
@@ -1005,6 +1076,8 @@ def main():
         from providers.keys import run_keeper as run_keys_keeper
 
         run_keys_keeper(*args.keys_keeper)
+    elif args.configure:
+        run_configure_wizard(TerminalPrompter())
 
 
 if __name__ == "__main__":
