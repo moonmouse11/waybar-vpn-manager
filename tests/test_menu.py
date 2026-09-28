@@ -764,7 +764,6 @@ def test_tools_menu_lists_every_visible_tool(monkeypatch):
     for label in (
         "🔍 DNS Leak Test",
         "ℹ️ IP Info",
-        "🔎 Subdomain Search",
         "⚡ Speed Test",
         "🔄 Refresh All",
         "🗑 Clear Caches",
@@ -791,53 +790,6 @@ def test_tools_menu_hides_disabled_tool(monkeypatch):
     vpn_manager.tools_menu()
     assert "🔍 DNS Leak Test" not in seen[0]
     assert "ℹ️ IP Info" in seen[0]  # untouched key stays visible
-
-
-def test_subdomain_search_menu_happy_path(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
-    monkeypatch.setattr(vpn_manager, "walker_input", lambda prompt: "example.com")
-    monkeypatch.setattr(
-        vpn_manager.crtname, "search", lambda domain: ["a.example.com", "b.example.com"]
-    )
-    seen = []
-    monkeypatch.setattr(
-        vpn_manager,
-        "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
-    )
-    result = vpn_manager.subdomain_search_menu()
-    assert result.success
-    assert seen[0] == ["a.example.com", "b.example.com", "‹ Back"]
-
-
-def test_subdomain_search_menu_no_domain_entered(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "walker_input", lambda prompt: None)
-    result = vpn_manager.subdomain_search_menu()
-    assert result.success  # silent cancel, matches import_config_file's "no path" non-error
-
-
-def test_subdomain_search_menu_network_failure(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager, "walker_input", lambda prompt: "example.com")
-    monkeypatch.setattr(vpn_manager.crtname, "search", lambda domain: None)
-    result = vpn_manager.subdomain_search_menu()
-    assert not result.success
-
-
-def test_subdomain_search_menu_no_results(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
-    monkeypatch.setattr(vpn_manager, "walker_input", lambda prompt: "example.com")
-    monkeypatch.setattr(vpn_manager.crtname, "search", lambda domain: [])
-    seen = []
-    monkeypatch.setattr(
-        vpn_manager,
-        "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
-    )
-    vpn_manager.subdomain_search_menu()
-    assert seen[0] == ["No subdomains found", "‹ Back"]
 
 
 def test_speed_test_menu_happy_path(monkeypatch):

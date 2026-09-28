@@ -18,7 +18,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import config
-import crtname
 import dnsleak
 import happmeta
 import ipinfo
@@ -385,23 +384,6 @@ def ip_info_menu() -> ActionResult:
     return ActionResult(True, "")
 
 
-def subdomain_search_menu() -> ActionResult:
-    """crt.name-backed subdomain search — prompts for an apex domain, then
-    shows every subdomain on file for it."""
-    domain = walker_input("Domain (apex)")
-    if not domain:
-        return ActionResult(True, "")
-    subs = crtname.search(domain)
-    if subs is None:
-        return ActionResult(False, "Не удалось выполнить поиск — нет сети?")
-    items = [(s, lambda: ActionResult(True, "")) for s in subs] or [
-        ("No subdomains found", lambda: ActionResult(True, ""))
-    ]
-    items.append(("‹ Back", tools_menu))
-    run_items(_unique_labels(items), prompt=f"Subdomains: {domain}")
-    return ActionResult(True, "")
-
-
 def speed_test_menu() -> ActionResult:
     """Single-measurement download throughput through the current tunnel."""
     notify("Speed Test", "Тест запущен, это займёт несколько секунд…")
@@ -534,7 +516,6 @@ def settings_menu() -> ActionResult:
 TOOLS = [
     ("dns_leak_test", "🔍 DNS Leak Test", dns_leak_test_menu),
     ("ip_info", "ℹ️ IP Info", ip_info_menu),
-    ("subdomain_search", "🔎 Subdomain Search", subdomain_search_menu),
     ("speed_test", "⚡ Speed Test", speed_test_menu),
     ("refresh_all", "🔄 Refresh All", refresh_all_menu),
     ("clear_caches", "🗑 Clear Caches", clear_caches_menu),

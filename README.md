@@ -28,8 +28,8 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
   (`~/.config/vpn-manager/config.json`)
 - **NetworkManager provider** — shows/controls any VPN connection NM manages
   (openvpn, wireguard, vpnc, ikev2, openconnect, …)
-- **🛠 Tools submenu** — DNS Leak Test, IP Info, Subdomain Search, Speed Test,
-  Refresh All, Clear Caches, Settings and Killswitch, grouped off the main menu
+- **🛠 Tools submenu** — DNS Leak Test, IP Info, Speed Test, Refresh All,
+  Clear Caches, Settings and Killswitch, grouped off the main menu
 - **Pluggable IP sources** — multi-source exit-IP/reputation lookups (free
   sources on by default; keyed sources like AbuseIPDB/IPQualityScore once an
   API key is configured), managed from the same `~/.config/vpn-manager/config.json`
