@@ -191,7 +191,7 @@ def test_happ_provider_menu_labels_show_availability(monkeypatch, tmp_path):
     ]
     vpn_manager.happ_provider_menu(IdleProvider(), "P", entries)
     assert "✓ 12 ms" in seen[0][0]
-    assert "✗" in seen[0][1]
+    assert "⛔" in seen[0][1]
     assert seen[0][2] == "unknown"  # stale -> no mark at all
 
 

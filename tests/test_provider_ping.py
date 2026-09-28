@@ -199,7 +199,7 @@ def test_ping_mark_states(tmp_path, monkeypatch):
         )
     )
     assert happmeta.ping_mark("up") == "✓ 42 ms"
-    assert happmeta.ping_mark("down") == "✗"
+    assert happmeta.ping_mark("down") == "⛔"
     assert happmeta.ping_mark("stale") == ""
     assert happmeta.ping_mark("absent") == ""
 
@@ -223,7 +223,7 @@ def test_write_pings_combined_targets(tmp_path, monkeypatch):
     data = json.loads(ping_file.read_text())
     assert data["srv-happ"] == {"ms": 7.0, "at": data["srv-happ"]["at"]}
     assert data["wg"]["ms"] == 7.0
-    assert data["dead"]["ms"] is None  # failure recorded for the ✗ mark
+    assert data["dead"]["ms"] is None  # failure recorded for the ⛔ mark
     assert set(measured) == {("h.example.com", 443), ("w.example.com", 51820),
                              ("127.0.0.1", 9)}
     assert time.time() - data["updated_at"] < 5
@@ -264,7 +264,7 @@ def test_provider_menu_labels_show_ping(monkeypatch, tmp_path):
     vpn_manager.provider_menu(wg)
     options = seen[0]
     assert "fast    ✓ 12 ms" in options
-    assert "down    ✗" in options
+    assert "down    ⛔" in options
     assert "Disconnect unmeasured" in options  # stale measurement: plain label
     assert not any(o.endswith("unmeasured    ✓ 1 ms") for o in options)
 
@@ -287,7 +287,7 @@ def test_write_pings_bad_target_does_not_abort_sweep(tmp_path, monkeypatch):
     happmeta.write_pings([("good", "g.example.com", 443), ("bad", "b.example.com", 70000)])
     data = json.loads(ping_file.read_text())
     assert data["good"]["ms"] == 5.0
-    assert data["bad"]["ms"] is None  # recorded as ✗, sweep not aborted
+    assert data["bad"]["ms"] is None  # recorded as ⛔, sweep not aborted
     assert time.time() - data["updated_at"] < 5
 
 

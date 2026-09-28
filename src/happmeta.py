@@ -727,13 +727,13 @@ def _fresh_ping_entry(name: str) -> dict | None:
 
 
 def ping_mark(name: str) -> str:
-    """'✓ 42 ms' / '✗' / '' — the Happ GUI availability metaphor for any
+    """'✓ 42 ms' / '⛔' / '' — the Happ GUI availability metaphor for any
     connection name in the shared ping cache (Happ, WireGuard, OpenVPN)."""
     entry = _fresh_ping_entry(name)
     if entry is None:
         return ""
     if entry.get("ms") is None:
-        return "✗"
+        return "⛔"
     return f"✓ {entry['ms']:.0f} ms"
 
 
@@ -743,7 +743,7 @@ def server_info_suffix(name: str) -> str:
     case); a server never measured stays unmarked so the label does not get
     noisy."""
     mark = ping_mark(name)
-    if not mark or mark == "✗":
+    if not mark or mark == "⛔":
         return mark
     parts = [mark]
     params = server_params(name)
