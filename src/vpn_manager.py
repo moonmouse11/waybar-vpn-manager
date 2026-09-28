@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import subprocess
 import sys
@@ -406,11 +407,45 @@ def speed_test_menu() -> ActionResult:
 
 
 def refresh_all_menu() -> ActionResult:
-    raise NotImplementedError  # implemented in Task 11
+    """Force a ping sweep (every provider) + Happ subscription sync now,
+    bypassing PING_MAX_AGE/SUB_MAX_AGE — request_ping_update()/
+    request_subscription_update() are staleness-gated and would otherwise
+    no-op if the last sweep was recent. Reputation is deliberately
+    excluded (its own daily cadence + IPAPI_PACE already make it a
+    multi-minute background job; forcing it from a menu click isn't
+    "refresh now", it's "wait a while", which belongs to its own timer)."""
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__)), "--update-ping"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__)), "--update-subs"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return ActionResult(True, "Обновление запущено в фоне")
+
+
+CACHE_DIR = Path.home() / ".cache/vpn-manager"
 
 
 def clear_caches_menu() -> ActionResult:
-    raise NotImplementedError  # implemented in Task 11
+    """Every cache this project writes lives under CACHE_DIR (happmeta's
+    PING_CACHE/PROVIDERS_CACHE/subscription-*.json, reputation.CACHE,
+    ipinfo.CACHE_PATH, providers/base.py's RATE_CACHE) — safe to delete on
+    demand, every reader already tolerates a missing file.
+    ~/.config/happ-capture/ is NOT touched — that's captured server data,
+    not a cache."""
+    removed = 0
+    if CACHE_DIR.is_dir():
+        for f in CACHE_DIR.glob("*.json"):
+            with contextlib.suppress(OSError):
+                f.unlink()
+                removed += 1
+    return ActionResult(True, f"Кэш очищен ({removed} файлов) — пересоберётся сам")
 
 
 def settings_menu() -> ActionResult:

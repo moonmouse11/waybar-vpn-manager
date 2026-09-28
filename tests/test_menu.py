@@ -1129,3 +1129,38 @@ def test_walker_input_passes_width_flags(monkeypatch):
     vpn_manager.walker_input("Path")
     cmd = captured["cmd"]
     assert "--width" in cmd and cmd[cmd.index("--width") + 1] == str(vpn_manager.WALKER_WIDTH)
+
+
+def test_refresh_all_menu_spawns_ping_and_subs_unconditionally(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        vpn_manager.subprocess, "Popen", lambda cmd, **k: calls.append(cmd) or None
+    )
+    result = vpn_manager.refresh_all_menu()
+    assert result.success
+    flags = [c[2] for c in calls]  # [sys.executable, script_path, flag]
+    assert "--update-ping" in flags
+    assert "--update-subs" in flags
+
+
+def test_clear_caches_menu_removes_only_json_files(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "vpn-manager"
+    cache_dir.mkdir()
+    (cache_dir / "reputation.json").write_text("{}")
+    (cache_dir / "happ-ping.json").write_text("{}")
+    keep = cache_dir / "not-a-cache.txt"
+    keep.write_text("keep me")
+    monkeypatch.setattr(vpn_manager, "CACHE_DIR", cache_dir)
+
+    result = vpn_manager.clear_caches_menu()
+
+    assert result.success
+    assert not (cache_dir / "reputation.json").exists()
+    assert not (cache_dir / "happ-ping.json").exists()
+    assert keep.exists()
+
+
+def test_clear_caches_menu_tolerates_missing_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(vpn_manager, "CACHE_DIR", tmp_path / "does-not-exist")
+    result = vpn_manager.clear_caches_menu()
+    assert result.success
