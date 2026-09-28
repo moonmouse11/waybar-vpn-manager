@@ -13,10 +13,13 @@ TIMEOUT = 20
 
 
 def measure() -> float | None:
-    """MB/s over a single 10 MB download, or None on failure."""
+    """MB/s over a single 10 MB download, or None on failure. Cloudflare
+    returns 403 to the default urllib User-Agent, so a browser-like one
+    is set explicitly."""
+    req = urllib.request.Request(URL, headers={"User-Agent": "Mozilla/5.0"})
     try:
         t0 = time.perf_counter()
-        with urllib.request.urlopen(URL, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             n = len(resp.read())
         dt = time.perf_counter() - t0
     except (OSError, ValueError, http.client.HTTPException):

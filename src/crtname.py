@@ -7,7 +7,6 @@ normal use.
 """
 
 import http.client
-import json
 import urllib.parse
 import urllib.request
 
@@ -17,13 +16,13 @@ TIMEOUT = 8
 
 def search(domain: str) -> list[str] | None:
     """Every subdomain crt.name has on file for domain (possibly empty),
-    or None on any network/parse failure."""
+    or None on any network/parse failure. The live API returns a plain
+    text, newline-separated list of hostnames — not JSON, despite the
+    endpoint's shape suggesting otherwise."""
     url = f"{API}?apex={urllib.parse.quote_plus(domain)}"
     try:
         with urllib.request.urlopen(url, timeout=TIMEOUT) as resp:
-            data = json.loads(resp.read().decode())
+            text = resp.read().decode()
     except (OSError, ValueError, http.client.HTTPException):
         return None
-    if not isinstance(data, list):
-        return None
-    return [entry["sub"] for entry in data if isinstance(entry, dict) and "sub" in entry]
+    return [line.strip() for line in text.splitlines() if line.strip()]
