@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import config
+import crtname
 import dnsleak
 import happmeta
 import ipinfo
@@ -22,6 +23,7 @@ import ipv6guard
 import killswitch
 import logutil
 import reputation
+import speedtest
 from providers import ALL_PROVIDERS
 from providers.base import (
     ActionResult,
@@ -377,6 +379,69 @@ def ip_info_menu() -> ActionResult:
     return ActionResult(True, "")
 
 
+def subdomain_search_menu() -> ActionResult:
+    """crt.name-backed subdomain search — prompts for an apex domain, then
+    shows every subdomain on file for it."""
+    domain = walker_input("Domain (apex)")
+    if not domain:
+        return ActionResult(True, "")
+    subs = crtname.search(domain)
+    if subs is None:
+        return ActionResult(False, "Не удалось выполнить поиск — нет сети?")
+    items = [(s, lambda: ActionResult(True, "")) for s in subs] or [
+        ("No subdomains found", lambda: ActionResult(True, ""))
+    ]
+    items.append(("‹ Back", back_to_main))
+    run_items(_unique_labels(items), prompt=f"Subdomains: {domain}")
+    return ActionResult(True, "")
+
+
+def speed_test_menu() -> ActionResult:
+    """Single-measurement download throughput through the current tunnel."""
+    notify("Speed Test", "Тест запущен, это займёт несколько секунд…")
+    mbps = speedtest.measure()
+    if mbps is None:
+        return ActionResult(False, "Не удалось выполнить тест — нет сети?")
+    return ActionResult(True, f"⬇ {mbps:.1f} MB/s")
+
+
+def refresh_all_menu() -> ActionResult:
+    raise NotImplementedError  # implemented in Task 11
+
+
+def clear_caches_menu() -> ActionResult:
+    raise NotImplementedError  # implemented in Task 11
+
+
+def settings_menu() -> ActionResult:
+    raise NotImplementedError  # implemented in Task 12
+
+
+# single source of truth for both tools_menu()'s rows and the configure
+# wizard's questions (key, label, action) — killswitch is handled
+# separately in both places since its row reflects live on/off state
+# (_killswitch_item()), not a fixed action function.
+TOOLS = [
+    ("dns_leak_test", "🔍 DNS Leak Test", dns_leak_test_menu),
+    ("ip_info", "ℹ️ IP Info", ip_info_menu),
+    ("subdomain_search", "🔎 Subdomain Search", subdomain_search_menu),
+    ("speed_test", "⚡ Speed Test", speed_test_menu),
+    ("refresh_all", "🔄 Refresh All", refresh_all_menu),
+    ("clear_caches", "🗑 Clear Caches", clear_caches_menu),
+    ("settings", "⚙ Settings", settings_menu),
+]
+
+
+def tools_menu() -> ActionResult:
+    cfg = config.load_config()
+    items = [(label, fn) for key, label, fn in TOOLS if cfg.tool_visible(key)]
+    if cfg.tool_visible("killswitch"):
+        items.append(_killswitch_item())
+    items.append(("‹ Back", back_to_main))
+    run_items(_unique_labels(items), prompt="Tools")
+    return ActionResult(True, "")
+
+
 def provider_actions(provider) -> list[tuple[str, callable]]:
     """Import / manage entries for providers that support them."""
     if provider.name in ("WireGuard", "AmneziaWG"):
@@ -449,9 +514,7 @@ def menu_loop() -> ActionResult:
         else:
             items.append((f"Disconnect ALL  ({len(all_active)})", disconnect_all))
 
-    items.append(("🔍 DNS Leak Test", dns_leak_test_menu))
-    items.append(("ℹ️ IP Info", ip_info_menu))
-    items.append(_killswitch_item())  # always the last row
+    items.append(("🛠 Tools", tools_menu))
     return run_items(items, prompt="VPN")
 
 
