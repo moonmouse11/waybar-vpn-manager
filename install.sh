@@ -166,3 +166,8 @@ echo ""
 echo "    Restart the components:"
 echo "      omarchy restart waybar"
 echo "      hyprctl reload   (or just log out/in)"
+
+# ── Interactive configuration ─────────────────────────────────────────────────
+
+echo ""
+python3 "$REPO_DIR/src/vpn_manager.py" --configure
