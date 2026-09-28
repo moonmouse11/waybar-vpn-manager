@@ -195,6 +195,27 @@ def test_lookup_self_returns_empty_when_ip_undetectable(monkeypatch):
     assert reputation.lookup_self() == []
 
 
+def test_lookup_self_bounds_total_time_when_a_source_hangs(monkeypatch):
+    """A hung source must not make the interactive 'IP Info' action block
+    past LOOKUP_TIMEOUT — same thread + join(timeout=...) guard as
+    lookup_host() already uses."""
+    monkeypatch.setattr(reputation, "_detect_own_ip", lambda: "9.9.9.9")
+    monkeypatch.setattr(reputation, "LOOKUP_TIMEOUT", 0.05)
+
+    class Slow(_FakeSource):
+        def lookup(self, ip):
+            time.sleep(5)
+            return IPFinding(source=self.name, ip=ip)
+
+    monkeypatch.setattr(reputation.ipsources, "ALL_SOURCES", [Slow("Slow")])
+    start = time.monotonic()
+    findings = reputation.lookup_self()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1  # bounded by LOOKUP_TIMEOUT, not by the source's 5s sleep
+    assert findings == []  # the hung source never got to append its finding in time
+
+
 def test_detect_own_ip_primary_source(monkeypatch):
     monkeypatch.setattr(
         reputation, "_get_json", lambda url: {"success": True, "ip": "1.2.3.4"}

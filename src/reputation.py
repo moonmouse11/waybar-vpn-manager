@@ -135,18 +135,29 @@ def lookup_self(include_keyed: bool = True) -> list[IPFinding]:
     every enabled source (keyed included by default) against that one
     address — every source is asked about the SAME IP, rather than each
     source's own "self-detect" endpoint potentially reporting a different
-    one."""
+    one. The source-querying phase is thread-guarded exactly like
+    lookup_host()'s: this feeds a synchronous, interactive menu action, so
+    up to 4 sources each with their own up-to-8s fetch_json timeout must
+    never add up to more than ~LOOKUP_TIMEOUT of total wall-clock time
+    (_detect_own_ip()'s own timeout chain, run before this guard starts,
+    is a separate, smaller, already-bounded cost)."""
     ip = _detect_own_ip()
     if not ip:
         return []
-    findings = []
-    for source in _enabled_sources(include_keyed):
-        try:
-            finding = source.lookup(ip)
-        except Exception:  # noqa: BLE001 - one bad source must not break the others
-            finding = None
-        if finding is not None:
-            findings.append(finding)
+    findings: list[IPFinding] = []
+
+    def _work() -> None:
+        for source in _enabled_sources(include_keyed):
+            try:
+                finding = source.lookup(ip)
+            except Exception:  # noqa: BLE001 - one bad source must not break the others
+                finding = None
+            if finding is not None:
+                findings.append(finding)
+
+    worker = threading.Thread(target=_work, daemon=True)
+    worker.start()
+    worker.join(timeout=LOOKUP_TIMEOUT)
     return findings
 
 
