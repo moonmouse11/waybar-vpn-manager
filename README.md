@@ -19,8 +19,11 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
   the Happ GUI** (it keeps working in parallel, state is shared via happd)
 - **Ping + info in labels** — background-measured TCP ping, non-standard protocols
   shown next to server names
-- **Killswitch (Happ TUN)** — nftables rules: no tunnel → no internet at all;
-  auto-suspends for other providers, auto-resumes on the next Happ connect
+- **Killswitch** — nftables rules: no tunnel → no internet at all; three modes
+  (off / auto-with-Happ-only / auto-with-every-provider), see [Killswitch](#killswitch)
+- **IPv6 leak guard** — none of the providers tunnel IPv6, so a live IPv6 route
+  (including IPv6 DNS) would otherwise bypass every tunnel entirely; disabled
+  system-wide for as long as any connection is active, restored once idle
 - **Config import** — WireGuard/OpenVPN (system dirs) and via `nmcli connection import`
 - **Profile management** — autostart toggle (systemd `wg-quick@` / NM autoconnect),
   config delete, all from the menu
@@ -28,6 +31,14 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
   (`~/.config/vpn-manager/config.json`)
 - **NetworkManager provider** — shows/controls any VPN connection NM manages
   (openvpn, wireguard, vpnc, ikev2, openconnect, …)
+- **🛠 Tools submenu** — DNS Leak Test, IP Info, Speed Test, Refresh All,
+  Clear Caches, Settings and Killswitch, grouped off the main menu
+- **Pluggable IP sources** — multi-source exit-IP/reputation lookups (free
+  sources on by default; keyed sources like AbuseIPDB/IPQualityScore once an
+  API key is configured), managed from the same `~/.config/vpn-manager/config.json`
+- **Interactive setup wizard** — `--configure` (or the in-menu ⚙ Settings action)
+  walks through providers, tools and IP sources; runs automatically as the last
+  step of `make install`
 
 ## Requirements
 
@@ -67,6 +78,11 @@ The installer:
 4. Copies sources to `~/.config/waybar/vpn-manager/`, wrappers to `~/.config/waybar/scripts/`
 5. Inserts the `custom/vpn` module into `~/.config/waybar/config.jsonc` (skipped if present)
 6. Appends a `SUPER+Shift+V` binding to `~/.config/hypr/bindings.conf` (idempotent)
+7. Runs the interactive configuration wizard (`--configure`) — pick which providers,
+   tools and IP sources to show, and optionally set IP-source API keys; safe to
+   Ctrl-C or skip (e.g. non-interactive installs), re-run any time with:
+   `python3 ~/.config/waybar/vpn-manager/vpn_manager.py --configure`, or via the
+   in-menu ⚙ Settings action
 
 Then restart:
 
@@ -96,18 +112,34 @@ provider appear automatically.
 ```jsonc
 {
   "providers": {"outline": false},      // hide providers from menu/status
-  "killswitch_mode": "happ",            // "off" | "happ" — auto-manage killswitch
-  "exit_ip": {"enabled": true, "max_age_seconds": 600}
+  "killswitch_mode": "happ",            // "off" | "happ" | "all" — auto-manage killswitch
+  "exit_ip": {"enabled": true, "max_age_seconds": 600},
+  "ip_sources": {                       // 🛠 Tools → IP Info source configuration
+    "abuseipdb": {"api_key": "..."},    // keyed sources: enabled by setting api_key
+    "ipwhois": {"enabled": true}        // free sources: enabled by default, opt-out here
+  },
+  "tools_visible": {"dns_leak_test": true, "killswitch": true}  // hide 🛠 Tools entries
 }
 ```
 
+Run the interactive wizard (`--configure`, or ⚙ Settings in the 🛠 Tools menu) instead of
+hand-editing `ip_sources`/`tools_visible` if you'd rather be walked through it.
+
 ## Killswitch
 
-`happ-killswitch on` blocks all outbound traffic except the `happ-*` tunnel,
-local networks and the Happ server IPs (whitelist refreshed on connect via
-`happ-killswitch detect`). Menu toggle persists the preference; connecting a
-non-Happ provider suspends it for the duration. Rollback: `happ-killswitch off`
-(rules don't survive reboot anyway).
+`happ-killswitch on` blocks all outbound traffic except the tunnel interface(s),
+DNS, local networks and the VPN server IPs (whitelist refreshed on connect via
+`happ-killswitch detect` plus any resolved endpoint IPs). Three modes
+(`killswitch_mode` in config, or the 🛠 Tools → Killswitch toggle):
+
+- **off** — managed manually from the menu, no auto behaviour
+- **happ** — auto-enabled alongside Happ only; suspended while any other
+  provider is connected, re-arms on the next Happ connect
+- **all** — auto-enabled for every connect; WireGuard/AmneziaWG/OpenVPN/
+  VLESS/Shadowsocks endpoints are resolved from their configs and
+  whitelisted too (NetworkManager isn't parsed yet — suspended for it)
+
+Rollback: `happ-killswitch off` (rules don't survive reboot anyway).
 
 ## Architecture
 
@@ -118,13 +150,18 @@ Happ connect --> --happ-keeper (long-lived happd session owning xray)
               --> happd (root daemon) --> xray (TUN)
 
 src/
-  vpn_manager.py      entry point: status, menu, background workers
-  config.py           user config load/save
+  vpn_manager.py      entry point: status, menu, Tools submenu, configure wizard
+  config.py           user config load/save (providers, tools_visible, ip_sources, …)
   ipinfo.py           exit IP cache (+ --update-ip worker)
   happmeta.py         Happ subscriptions, config merge, ping cache
   killswitch.py       nft killswitch wrapper (mode-aware)
+  ipv6guard.py        disables IPv6 system-wide while any tunnel is active (leak guard)
+  reputation.py       exit-IP reputation orchestrator over ipsources/
+  dnsleak.py          DNS leak test (dnsleaktest.com protocol, no external script)
+  speedtest.py        single-measurement tunnel throughput (Cloudflare)
   logutil.py          file logging
-  providers/          provider registry + implementations
+  providers/          VPN backend registry + implementations (VPNProvider ABC)
+  ipsources/          IP-intelligence source registry + implementations (IPInfoSource ABC)
 docs/happd-protocol.md   Happ daemon protocol RE notes
 scripts/              dev/research tools (subscription intercept, strace capture, …)
 tests/                pytest suite
@@ -178,6 +215,26 @@ class MyProvider(VPNProvider):
 
 Register it in `src/providers/__init__.py`. Optional niceties: per-provider CSS
 class appears automatically (`vpn-<provider-lowercase>`).
+
+## Adding a new IP-intelligence source
+
+Same shape, for `🛠 Tools → ℹ️ IP Info` and the background reputation sweep.
+Create `src/ipsources/mysource.py` implementing `IPInfoSource`:
+
+```python
+from ipsources import base
+
+class MySource(base.IPInfoSource):
+    key = "mysource"
+    name = "My Source"
+    needs_api_key = False  # True reads config.json's ip_sources[key]["api_key"]
+
+    def lookup(self, ip: str) -> base.IPFinding | None: ...
+```
+
+Register it in `src/ipsources/__init__.py`'s `ALL_SOURCES`. Keyed sources are
+used only by the on-demand IP Info action, never by the daily background
+sweep — a present `api_key` in config *is* "enabled", no separate flag needed.
 
 ## Uninstall
 

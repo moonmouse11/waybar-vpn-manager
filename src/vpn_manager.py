@@ -7,9 +7,12 @@ Usage:
 """
 
 import argparse
+import contextlib
+import getpass
 import json
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -18,10 +21,12 @@ import config
 import dnsleak
 import happmeta
 import ipinfo
+import ipsources
 import ipv6guard
 import killswitch
 import logutil
 import reputation
+import speedtest
 from providers import ALL_PROVIDERS
 from providers.base import (
     ActionResult,
@@ -50,6 +55,7 @@ def active_connections(providers=None) -> list[VPNConnection]:
 
 
 NO_VPN = "direct"  # pseudo-connection key for the ipinfo cache when no VPN is up
+BACK_LABEL = "‹ Back"
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -344,7 +350,7 @@ def dns_leak_test_menu() -> ActionResult:
     if result["conclusion"]:
         icon = _dns_leak_verdict_icon(result["conclusion"])
         items.append((f"{icon}{result['conclusion']}", lambda: ActionResult(True, "")))
-    items.append(("‹ Back", back_to_main))
+    items.append((BACK_LABEL, tools_menu))
     run_items(_unique_labels(items), prompt="DNS Leak Test")
     return ActionResult(True, "")
 
@@ -355,30 +361,180 @@ def _ip_info_flag_row(label: str, value: bool | None) -> tuple[str, callable]:
 
 
 def ip_info_menu() -> ActionResult:
-    """Multi-source exit-IP report (ipwho.is + ip-api.com) — the free,
-    keyless equivalent of what a paid checker like checkip.com shows for
-    DataCenter/Residential/Proxy classification, via ip-api.com's
-    hosting/proxy/mobile flags. A single ad-hoc lookup for the current
-    public IP, not the background reputation sweep."""
+    """Multi-source exit-IP report — one row group per enabled ipsources
+    source (free ones on by default; keyed ones once their API key is
+    set). A single ad-hoc lookup for the current public IP, not the
+    background reputation sweep."""
     notify("IP Info", "Проверка запущена, это займёт несколько секунд…")
-    result = reputation.lookup_self()
-    if result is None:
+    findings = reputation.lookup_self(include_keyed=True)
+    if not findings:
         return ActionResult(False, "Не удалось получить информацию об IP — нет сети?")
 
-    items: list[tuple[str, callable]] = []
-    if result["ip"]:
-        items.append((f"IP: {result['ip']}", lambda: ActionResult(True, "")))
-    ipwho_parts = [p for p in (result["ipwho_country"], result["ipwho_org"]) if p]
-    if ipwho_parts:
-        items.append((f"ipwho.is: {' · '.join(ipwho_parts)}", lambda: ActionResult(True, "")))
-    ipapi_parts = [p for p in (result["ipapi_country"], result["ipapi_isp"]) if p]
-    if ipapi_parts:
-        items.append((f"ip-api.com: {' · '.join(ipapi_parts)}", lambda: ActionResult(True, "")))
-    items.append(_ip_info_flag_row("🏢 Datacenter/Hosting", result.get("hosting")))
-    items.append(_ip_info_flag_row("🕵 Proxy/VPN detected", result.get("proxy")))
-    items.append(_ip_info_flag_row("📱 Mobile network", result.get("mobile")))
-    items.append(("‹ Back", back_to_main))
+    items: list[tuple[str, callable]] = [(f"IP: {findings[0].ip}", lambda: ActionResult(True, ""))]
+    for finding in findings:
+        parts = [p for p in (finding.country_name, finding.org) if p]
+        if finding.abuse_score is not None:
+            parts.append(f"abuse {finding.abuse_score}/100")
+        label = f"{finding.source}: {' · '.join(parts)}" if parts else finding.source
+        items.append((label, lambda: ActionResult(True, "")))
+    items.append(_ip_info_flag_row("🏢 Datacenter/Hosting", any(f.hosting for f in findings)))
+    items.append(_ip_info_flag_row("🕵 Proxy/VPN detected", any(f.proxy for f in findings)))
+    items.append(_ip_info_flag_row("📱 Mobile network", any(f.mobile for f in findings)))
+    items.append((BACK_LABEL, tools_menu))
     run_items(_unique_labels(items), prompt="IP Info")
+    return ActionResult(True, "")
+
+
+def speed_test_menu() -> ActionResult:
+    """Single-measurement download throughput through the current tunnel."""
+    notify("Speed Test", "Тест запущен, это займёт несколько секунд…")
+    mbps = speedtest.measure()
+    if mbps is None:
+        return ActionResult(False, "Не удалось выполнить тест — нет сети?")
+    return ActionResult(True, f"⬇ {mbps:.1f} MB/s")
+
+
+def refresh_all_menu() -> ActionResult:
+    """Force a ping sweep (every provider) + Happ subscription sync now,
+    bypassing PING_MAX_AGE/SUB_MAX_AGE — request_ping_update()/
+    request_subscription_update() are staleness-gated and would otherwise
+    no-op if the last sweep was recent. Reputation is deliberately
+    excluded (its own daily cadence + IPAPI_PACE already make it a
+    multi-minute background job; forcing it from a menu click isn't
+    "refresh now", it's "wait a while", which belongs to its own timer)."""
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__)), "--update-ping"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__)), "--update-subs"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return ActionResult(True, "Обновление запущено в фоне")
+
+
+CACHE_DIR = Path.home() / ".cache/vpn-manager"
+
+
+def clear_caches_menu() -> ActionResult:
+    """Every cache this project writes lives under CACHE_DIR (happmeta's
+    PING_CACHE/PROVIDERS_CACHE/subscription-*.json, reputation.CACHE,
+    ipinfo.CACHE_PATH, providers/base.py's RATE_CACHE) — safe to delete on
+    demand, every reader already tolerates a missing file.
+    ~/.config/happ-capture/ is NOT touched — that's captured server data,
+    not a cache."""
+    removed = 0
+    if CACHE_DIR.is_dir():
+        for f in CACHE_DIR.glob("*.json"):
+            with contextlib.suppress(OSError):
+                f.unlink()
+                removed += 1
+    return ActionResult(True, f"Кэш очищен ({removed} файлов) — пересоберётся сам")
+
+
+class Prompter(ABC):
+    @abstractmethod
+    def confirm(self, question: str, default: bool) -> bool: ...
+
+    @abstractmethod
+    def text(self, question: str) -> str: ...
+
+
+class TerminalPrompter(Prompter):
+    def confirm(self, question: str, default: bool) -> bool:
+        suffix = "[Y/n]" if default else "[y/N]"
+        try:
+            answer = input(f"{question} {suffix} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return default
+        return default if not answer else answer in ("y", "yes", "д", "да")
+
+    def text(self, question: str) -> str:
+        try:
+            return getpass.getpass(f"{question}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+
+class WalkerPrompter(Prompter):
+    def confirm(self, question: str, default: bool) -> bool:
+        selected = walker_select(["Да", "Нет"], prompt=question)
+        return (selected == "Да") if selected else default
+
+    def text(self, question: str) -> str:
+        return walker_input(question) or ""
+
+
+def run_configure_wizard(prompter: Prompter) -> bool:
+    """The provider/tool/source walk shared by --configure (TerminalPrompter,
+    install.sh's last step) and ⚙ Settings (WalkerPrompter, in-menu — no
+    reinstall needed). Never touches an existing config.json unless the
+    user opts in via the first confirm. Returns False when the user
+    declines reconfigure on an existing file; True after save."""
+    if config.CONFIG_PATH.exists():
+        if not prompter.confirm("Конфиг уже существует. Перенастроить?", False):
+            return False
+        cfg = config.load_config()
+    else:
+        cfg = config.Config()
+
+    for provider in ALL_PROVIDERS:
+        visible = prompter.confirm(
+            f"Показывать {provider.name}?", cfg.provider_visible(provider.name)
+        )
+        cfg.providers[provider.name.lower()] = visible
+
+    for key, label, _fn in [*TOOLS, ("killswitch", "Killswitch", None)]:
+        visible = prompter.confirm(f"Показывать инструмент «{label}»?", cfg.tool_visible(key))
+        cfg.tools_visible[key] = visible
+
+    for source in ipsources.ALL_SOURCES:
+        if source.needs_api_key:
+            answer = prompter.text(
+                f"API-ключ {source.name} (Enter — оставить как есть/пропустить)"
+            )
+            if answer:
+                cfg.ip_sources.setdefault(source.key, {})["api_key"] = answer
+        else:
+            enabled = prompter.confirm(f"Использовать {source.name}?", source.is_enabled())
+            cfg.ip_sources.setdefault(source.key, {})["enabled"] = enabled
+
+    config.save_config(cfg)
+    return True
+
+
+def settings_menu() -> ActionResult:
+    if run_configure_wizard(WalkerPrompter()):
+        return ActionResult(True, "Настройки сохранены")
+    # Declined reconfigure — not a failure; run_items() maps success=False to urgent errors.
+    return ActionResult(True, "Настройки без изменений")
+
+
+# single source of truth for both tools_menu()'s rows and the configure
+# wizard's questions (key, label, action) — killswitch is handled
+# separately in both places since its row reflects live on/off state
+# (_killswitch_item()), not a fixed action function.
+TOOLS = [
+    ("dns_leak_test", "🔍 DNS Leak Test", dns_leak_test_menu),
+    ("ip_info", "ℹ️ IP Info", ip_info_menu),
+    ("speed_test", "⚡ Speed Test", speed_test_menu),
+    ("refresh_all", "🔄 Refresh All", refresh_all_menu),
+    ("clear_caches", "🗑 Clear Caches", clear_caches_menu),
+    ("settings", "⚙ Settings", settings_menu),
+]
+
+
+def tools_menu() -> ActionResult:
+    cfg = config.load_config()
+    items = [(label, fn) for key, label, fn in TOOLS if cfg.tool_visible(key)]
+    if cfg.tool_visible("killswitch"):
+        items.append(_killswitch_item())
+    items.append((BACK_LABEL, back_to_main))
+    run_items(_unique_labels(items), prompt="Tools")
     return ActionResult(True, "")
 
 
@@ -454,9 +610,7 @@ def menu_loop() -> ActionResult:
         else:
             items.append((f"Disconnect ALL  ({len(all_active)})", disconnect_all))
 
-    items.append(("🔍 DNS Leak Test", dns_leak_test_menu))
-    items.append(("ℹ️ IP Info", ip_info_menu))
-    items.append(_killswitch_item())  # always the last row
+    items.append(("🛠 Tools", tools_menu))
     return run_items(items, prompt="VPN")
 
 
@@ -552,7 +706,7 @@ def provider_menu(provider) -> ActionResult:
             label = f"{conn.name}{suffix}"
             items.append((label, lambda c=conn: guarded_connect(provider, c)))
     items.extend(provider_actions(provider))
-    items.append(("‹ Back", back_to_main))
+    items.append((BACK_LABEL, back_to_main))
     run_items(_unique_labels(items), prompt=provider.name)
     # The submenu already notified/refreshed; stay silent for the parent level.
     return ActionResult(True, "")
@@ -598,7 +752,7 @@ def happ_menu(provider) -> ActionResult:
             label += "  (" + " · ".join(suffixes) + ")"
         items.append((label, lambda p=pname, g=group: happ_provider_menu(provider, p, g)))
     items.append(("  Refresh subscriptions", _refresh_subscriptions))
-    items.append(("‹ Back", back_to_main))
+    items.append((BACK_LABEL, back_to_main))
     run_items(items, prompt="Happ")
 
 
@@ -663,7 +817,7 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
             items.append((label, lambda c=conn: guarded_disconnect(provider, c)))
         else:
             items.append((label, lambda c=conn: guarded_connect(provider, c)))
-    items.append(("‹ Back", lambda: happ_menu(provider)))
+    items.append((BACK_LABEL, lambda: happ_menu(provider)))
     run_items(_unique_labels(items), prompt=pname[:40])
     return ActionResult(True, "")
 
@@ -777,7 +931,9 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
     return selected if selected else None
 
 
-def import_config_file(provider, title: str) -> ActionResult:
+def walker_input(prompt: str) -> str | None:
+    """Single-field text input via walker (-I, dmenu-only), same widened
+    window as walker_select(). None on any failure or empty input."""
     try:
         result = subprocess.run(
             [
@@ -785,7 +941,7 @@ def import_config_file(provider, title: str) -> ActionResult:
                 "-d",
                 "-I",
                 "-p",
-                f"{title} config path",
+                prompt,
                 "--width",
                 str(WALKER_WIDTH),
                 "--maxwidth",
@@ -794,11 +950,15 @@ def import_config_file(provider, title: str) -> ActionResult:
             capture_output=True,
             text=True,
         )
-        path = result.stdout.strip()
     except FileNotFoundError:
         notify("Error", "walker not found", urgent=True)
-        return ActionResult(success=False, message="walker not found")
+        return None
+    text = result.stdout.strip()
+    return text or None
 
+
+def import_config_file(provider, title: str) -> ActionResult:
+    path = walker_input(f"{title} config path")
     if not path:
         return ActionResult(success=False, message="No path entered")
     return provider.import_config(path)
@@ -881,6 +1041,11 @@ def main():
         action="store_true",
         help="Refresh server IP-reputation cache in the background (internal)",
     )
+    group.add_argument(
+        "--configure",
+        action="store_true",
+        help="Interactive setup wizard: providers, tools, IP sources/keys",
+    )
     args = parser.parse_args()
     if args.keys_keeper is not None and args.keys_keeper[0] not in ("ss", "vless"):
         kind = args.keys_keeper[0]
@@ -906,6 +1071,8 @@ def main():
         from providers.keys import run_keeper as run_keys_keeper
 
         run_keys_keeper(*args.keys_keeper)
+    elif args.configure:
+        run_configure_wizard(TerminalPrompter())
 
 
 if __name__ == "__main__":

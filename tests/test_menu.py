@@ -1,5 +1,6 @@
 import config
 import vpn_manager
+from ipsources.base import IPFinding
 from providers.base import ActionResult, VPNConnection
 
 
@@ -191,7 +192,7 @@ def test_happ_provider_menu_labels_show_availability(monkeypatch, tmp_path):
     ]
     vpn_manager.happ_provider_menu(IdleProvider(), "P", entries)
     assert "✓ 12 ms" in seen[0][0]
-    assert "✗" in seen[0][1]
+    assert "⛔" in seen[0][1]
     assert seen[0][2] == "unknown"  # stale -> no mark at all
 
 
@@ -381,7 +382,7 @@ def test_level1_active_count_label(monkeypatch):
     vpn_manager.run_menu()
     level1_options = seen_prompts[0][1]
     assert "WireGuard  (1/2)" in level1_options
-    assert any("Killswitch" in o for o in level1_options)
+    assert "🛠 Tools" in level1_options
 
 
 def test_killswitch_all_mode_arms_wg(monkeypatch, tmp_path):
@@ -551,7 +552,7 @@ def test_walker_select_passes_width_flags(monkeypatch):
 
 def test_level1_layout_connected(monkeypatch):
     """Menu order: current connection (first, with metrics) → providers →
-    quick disconnect, killswitch ALWAYS the last row."""
+    quick disconnect, Tools ALWAYS the last row."""
     wg = FakeProvider(
         "WireGuard",
         [VPNConnection(name="nl", provider="WireGuard", active=True, interface="wg0")],
@@ -570,7 +571,7 @@ def test_level1_layout_connected(monkeypatch):
     assert options[0].startswith("↻ WireGuard: nl")
     assert options[1] == "     ↓ 2.0 MiB/s ↑ 512.0 KiB/s · 1.2.3.4 🇩🇪"  # metrics row
     assert "Disconnect: WireGuard: nl" in options
-    assert options[-1].strip().startswith("Killswitch")
+    assert options[-1] == "🛠 Tools"
 
 
 def test_connect_disconnects_other_tunnels(monkeypatch):
@@ -654,7 +655,7 @@ def test_level1_disconnect_all_label_for_multiple(monkeypatch):
     vpn_manager.run_menu()
     options = seen[0]
     assert "Disconnect ALL  (2)" in options
-    assert options[-1].strip().startswith("Killswitch")
+    assert options[-1] == "🛠 Tools"
 
 
 def test_level1_no_disconnect_row_when_idle(monkeypatch):
@@ -670,7 +671,7 @@ def test_level1_no_disconnect_row_when_idle(monkeypatch):
     options = seen[0]
     assert not any(o.startswith("Disconnect") for o in options)
     assert not any(o.startswith("▶") for o in options)
-    assert options[-1].strip().startswith("Killswitch")
+    assert options[-1] == "🛠 Tools"
 
 
 def test_menu_loop_shows_named_keys_row_when_empty(monkeypatch):
@@ -703,7 +704,7 @@ def test_menu_loop_shows_named_keys_row_when_empty(monkeypatch):
     )
     vpn_manager.menu_loop()
     assert any(o.startswith("VLESS") for o in seen[0])
-    assert seen[0][-1].strip().startswith("Killswitch")  # killswitch always last
+    assert seen[0][-1] == "🛠 Tools"  # Tools always last
     assert imported == ["VLESS"]
 
 
@@ -727,11 +728,12 @@ def test_menu_loop_hides_empty_keys_by_default(monkeypatch):
     )
     vpn_manager.menu_loop()
     assert not any(o.startswith("VLESS") for o in seen[0])
-    assert seen[0][-1].strip().startswith("Killswitch")
+    assert seen[0][-1] == "🛠 Tools"
 
 
-def test_menu_loop_always_shows_dns_leak_test_and_ip_info_rows(monkeypatch):
-    """Present even with nothing configured/active, right before killswitch."""
+def test_menu_loop_always_shows_tools_row(monkeypatch):
+    """Present even with nothing configured/active, right before killswitch
+    moved inside it — Tools itself replaces the three separate rows."""
     patch_menu_env(monkeypatch, [], picks=[])
     seen = []
     monkeypatch.setattr(
@@ -740,10 +742,69 @@ def test_menu_loop_always_shows_dns_leak_test_and_ip_info_rows(monkeypatch):
         lambda options, prompt="VPN": (seen.append(list(options)) or None),
     )
     vpn_manager.menu_loop()
-    assert "🔍 DNS Leak Test" in seen[0]
-    assert "ℹ️ IP Info" in seen[0]
-    assert seen[0][-1].strip().startswith("Killswitch")
-    assert seen[0][-3:-1] == ["🔍 DNS Leak Test", "ℹ️ IP Info"]
+    assert "🛠 Tools" in seen[0]
+    assert "🔍 DNS Leak Test" not in seen[0]
+    assert "ℹ️ IP Info" not in seen[0]
+    assert not any(str(row).strip().startswith("Killswitch") for row in seen[0])
+
+
+def test_tools_menu_lists_every_visible_tool(monkeypatch):
+    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: config.Config())
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
+    monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="Tools": (seen.append(list(options)) or None),
+    )
+    vpn_manager.tools_menu()
+    rows = seen[0]
+    for label in (
+        "🔍 DNS Leak Test",
+        "ℹ️ IP Info",
+        "⚡ Speed Test",
+        "🔄 Refresh All",
+        "🗑 Clear Caches",
+        "⚙ Settings",
+    ):
+        assert label in rows
+    assert any(str(row).strip().startswith("Killswitch") for row in rows)
+    assert rows[-1] == "‹ Back"
+
+
+def test_tools_menu_hides_disabled_tool(monkeypatch):
+    cfg = config.Config()
+    cfg.tools_visible["dns_leak_test"] = False
+    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: cfg)
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
+    monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="Tools": (seen.append(list(options)) or None),
+    )
+    vpn_manager.tools_menu()
+    assert "🔍 DNS Leak Test" not in seen[0]
+    assert "ℹ️ IP Info" in seen[0]  # untouched key stays visible
+
+
+def test_speed_test_menu_happy_path(monkeypatch):
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager.speedtest, "measure", lambda: 12.34)
+    result = vpn_manager.speed_test_menu()
+    assert result.success
+    assert "12.3" in result.message
+
+
+def test_speed_test_menu_network_failure(monkeypatch):
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager.speedtest, "measure", lambda: None)
+    result = vpn_manager.speed_test_menu()
+    assert not result.success
 
 
 def test_dns_leak_server_row_flags_suspicious():
@@ -811,20 +872,19 @@ def test_dns_leak_test_menu_handles_network_failure(monkeypatch):
 def test_ip_info_menu_builds_rows(monkeypatch):
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
-    monkeypatch.setattr(
-        vpn_manager.reputation,
-        "lookup_self",
-        lambda: {
-            "ip": "1.2.3.4",
-            "ipwho_country": "Germany",
-            "ipwho_org": "jogcorp",
-            "ipapi_country": "France",
-            "ipapi_isp": "SMARTNET Germany GmbH",
-            "hosting": True,
-            "proxy": False,
-            "mobile": False,
-        },
-    )
+    findings = [
+        IPFinding(source="ipwho.is", ip="1.2.3.4", country_name="Germany", org="jogcorp"),
+        IPFinding(
+            source="ip-api.com",
+            ip="1.2.3.4",
+            country_name="France",
+            org="SMARTNET Germany GmbH",
+            hosting=True,
+            proxy=False,
+            mobile=False,
+        ),
+    ]
+    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda include_keyed=True: findings)
     seen = []
     monkeypatch.setattr(
         vpn_manager,
@@ -843,9 +903,9 @@ def test_ip_info_menu_builds_rows(monkeypatch):
     assert rows[-1] == "‹ Back"
 
 
-def test_ip_info_menu_handles_network_failure(monkeypatch):
+def test_ip_info_menu_handles_no_findings(monkeypatch):
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda: None)
+    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda include_keyed=True: [])
     result = vpn_manager.ip_info_menu()
     assert not result.success
 
@@ -980,3 +1040,79 @@ def test_happ_provider_menu_no_info_entry_without_record(monkeypatch):
     )
     vpn_manager.happ_provider_menu(provider, "P", entries)
     assert seen[0] == ["s1", "‹ Back"]
+
+
+def test_walker_input_returns_stripped_text(monkeypatch):
+    class R:
+        stdout = "  /home/user/config.conf  \n"
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", lambda cmd, **k: R())
+    assert vpn_manager.walker_input("Path") == "/home/user/config.conf"
+
+
+def test_walker_input_returns_none_when_empty(monkeypatch):
+    class R:
+        stdout = "\n"
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", lambda cmd, **k: R())
+    assert vpn_manager.walker_input("Path") is None
+
+
+def test_walker_input_returns_none_when_walker_missing(monkeypatch):
+    def boom(cmd, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", boom)
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    assert vpn_manager.walker_input("Path") is None
+
+
+def test_walker_input_passes_width_flags(monkeypatch):
+    captured = {}
+
+    class R:
+        stdout = "x\n"
+
+    def fake_run(cmd, **k):
+        captured["cmd"] = cmd
+        return R()
+
+    monkeypatch.setattr(vpn_manager.subprocess, "run", fake_run)
+    vpn_manager.walker_input("Path")
+    cmd = captured["cmd"]
+    assert "--width" in cmd and cmd[cmd.index("--width") + 1] == str(vpn_manager.WALKER_WIDTH)
+
+
+def test_refresh_all_menu_spawns_ping_and_subs_unconditionally(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        vpn_manager.subprocess, "Popen", lambda cmd, **k: calls.append(cmd) or None
+    )
+    result = vpn_manager.refresh_all_menu()
+    assert result.success
+    flags = [c[2] for c in calls]  # [sys.executable, script_path, flag]
+    assert "--update-ping" in flags
+    assert "--update-subs" in flags
+
+
+def test_clear_caches_menu_removes_only_json_files(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "vpn-manager"
+    cache_dir.mkdir()
+    (cache_dir / "reputation.json").write_text("{}")
+    (cache_dir / "happ-ping.json").write_text("{}")
+    keep = cache_dir / "not-a-cache.txt"
+    keep.write_text("keep me")
+    monkeypatch.setattr(vpn_manager, "CACHE_DIR", cache_dir)
+
+    result = vpn_manager.clear_caches_menu()
+
+    assert result.success
+    assert not (cache_dir / "reputation.json").exists()
+    assert not (cache_dir / "happ-ping.json").exists()
+    assert keep.exists()
+
+
+def test_clear_caches_menu_tolerates_missing_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(vpn_manager, "CACHE_DIR", tmp_path / "does-not-exist")
+    result = vpn_manager.clear_caches_menu()
+    assert result.success

@@ -489,7 +489,7 @@ def test_server_info_suffix_availability(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(happmeta, "server_params", lambda name: None)
     assert happmeta.server_info_suffix("up") == "✓ 42 ms"
-    assert happmeta.server_info_suffix("down") == "✗"
+    assert happmeta.server_info_suffix("down") == "⛔"
     assert happmeta.server_info_suffix("stale") == ""
     assert happmeta.server_info_suffix("absent") == ""
 

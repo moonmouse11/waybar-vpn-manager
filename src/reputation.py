@@ -1,9 +1,6 @@
-"""VPN exit/server IP reputation — flags connections whose network looks
-Russian-linked or datacenter/proxy-flagged, via two free, keyless sources:
-ipwho.is (country + ASN-owner domain) and ip-api.com (adds `hosting` /
-`proxy` / `mobile` flags — the same kind of DataCenter/Residential/Proxy
-classification a paid multi-source checker like checkip.com shows, without
-needing an API key).
+"""VPN exit/server IP reputation — flags connections against every enabled
+source in ipsources.ALL_SOURCES (Russian-linked registration, datacenter/
+proxy flags — see ipsources/ for the individual sources).
 
 Not a privacy/leak check by itself — purely a labelling aid so servers can
 be told apart in the menu, discovered manually during a DNS-leak
@@ -13,7 +10,10 @@ bridge routing physically through Russia.
 
 Same fire-and-forget cache pattern as happmeta's ping cache (PING_CACHE),
 but keyed by connection name with a much longer TTL — ASN registration is
-stable, unlike RTT.
+stable, unlike RTT. write_reputations() (the daily background sweep across
+every known server) only ever passes include_keyed=False — keyed/paid
+sources are for the on-demand lookup_self() ("IP Info" menu action) only,
+so a paid source's monthly quota is never at risk from routine menu use.
 """
 
 import json
@@ -25,21 +25,23 @@ import time
 import urllib.request
 from pathlib import Path
 
+import ipsources
+from ipsources.base import IPFinding, fetch_json
+
 CACHE = Path.home() / ".cache/vpn-manager/reputation.json"
 MAX_AGE = 24 * 3600  # a day — registration data doesn't change hour to hour
 LOOKUP_TIMEOUT = 8  # seconds, thread-guarded (urlopen's timeout excludes DNS)
-IPWHO_API = "https://ipwho.is/"
-# ip-api.com's free tier is HTTP-only (no key) and capped at 45 req/min —
-# fine for an ip that's just a public address, no credentials involved.
-IPAPI_URL = "http://ip-api.com/json/{}"
-IPAPI_FIELDS = "status,country,countryCode,isp,org,as,proxy,hosting,mobile,query"
-IPAPI_PACE = 1.5  # seconds between sweep calls, keeps well under the 45/min cap
+IPWHO_API = "https://ipwho.is/"  # used only by _detect_own_ip()'s primary check
+IPAPI_PACE = 1.5  # seconds between sweep hosts, keeps well under ip-api.com's 45/min cap
 
 MANAGER = Path(__file__).resolve().parent / "vpn_manager.py"
 
 
 def _reason_tags(entry: dict) -> list[str]:
-    """Which criteria this entry tripped, in display order."""
+    """Which criteria this entry tripped, in display order. Takes a plain
+    dict (not an IPFinding) — this is also called directly by ipinfo.py's
+    status_line() and vpn_manager._dns_leak_server_row(), each building an
+    ad-hoc dict from a data source unrelated to ipsources."""
     tags = []
     domain = (entry.get("domain") or "").lower()
     if entry.get("country_code") == "RU" or domain.endswith((".ru", ".su")):
@@ -55,76 +57,109 @@ def is_suspicious(entry: dict) -> bool:
     return bool(_reason_tags(entry))
 
 
-def _get_json(url: str) -> dict | None:
+def combined_tags(findings: list[IPFinding]) -> list[str]:
+    """Union of _reason_tags() over every finding, in first-seen order —
+    reuses the single-dict rules per finding instead of duplicating them."""
+    tags: list[str] = []
+    for finding in findings:
+        for tag in _reason_tags(vars(finding)):
+            if tag not in tags:
+                tags.append(tag)
+    return tags
+
+
+def is_flagged(findings: list[IPFinding]) -> bool:
+    return bool(combined_tags(findings))
+
+
+def _ipwho_bootstrap_enabled() -> bool:
+    for source in ipsources.ALL_SOURCES:
+        if source.key == "ipwhois":
+            return source.is_enabled()
+    return True
+
+
+def _detect_own_ip() -> str | None:
+    """Bootstrap for lookup_self(): the same ipwho.is-then-ifconfig.me
+    fallback chain ipinfo.py uses for its own exit-IP cache, duplicated
+    here (not imported) — ipinfo.py already imports reputation for
+    is_suspicious(), so importing ipinfo back would be circular. Skips
+    ipwho.is when the user disabled ipwho.is in config."""
+    if _ipwho_bootstrap_enabled():
+        data = fetch_json(IPWHO_API, timeout=6)
+        if data and data.get("success") and data.get("ip"):
+            return data["ip"]
     try:
-        with urllib.request.urlopen(url, timeout=6) as resp:
-            return json.loads(resp.read().decode())
-    except (OSError, ValueError):
+        with urllib.request.urlopen("https://ifconfig.me/ip", timeout=6) as resp:
+            return resp.read().decode().strip()
+    except OSError:
         return None
 
 
-def _lookup_ipapi(ip: str) -> dict:
-    """{'hosting', 'proxy', 'mobile'} (bools) from ip-api.com, or {} on any
-    failure — kept separate from ipwho.is so one source's outage never
-    blocks the other's data."""
-    data = _get_json(IPAPI_URL.format(ip) + f"?fields={IPAPI_FIELDS}")
-    if not data or data.get("status") != "success":
-        return {}
-    return {
-        "hosting": bool(data.get("hosting")),
-        "proxy": bool(data.get("proxy")),
-        "mobile": bool(data.get("mobile")),
-        "ipapi_country": data.get("country"),
-        "ipapi_isp": data.get("isp"),
-        "ipapi_as": data.get("as"),
-    }
+def _enabled_sources(include_keyed: bool):
+    return [
+        s
+        for s in ipsources.ALL_SOURCES
+        if s.is_enabled() and (include_keyed or not s.needs_api_key)
+    ]
 
 
-def _lookup(host: str) -> dict | None:
-    """{'country_code', 'domain', 'hosting', 'proxy', 'mobile', ...} for a
-    host's IP, merging ipwho.is + ip-api.com, or None on total failure.
-    Thread-guarded: urlopen's timeout does not cover the gethostbyname()
-    call, which can hang far longer than LOOKUP_TIMEOUT."""
-    result: dict = {}
+def lookup_host(host: str, include_keyed: bool) -> list[IPFinding]:
+    """Resolves host once, queries every enabled source with that one IP
+    (thread-guarded exactly like the old single-source _lookup() was —
+    urlopen's timeout does not cover gethostbyname(), which can hang far
+    longer than LOOKUP_TIMEOUT). One source failing never breaks the
+    others; a DNS failure yields no findings at all."""
+    result: list[IPFinding] = []
 
     def _work() -> None:
         try:
             ip = socket.gethostbyname(host)
         except OSError:
             return
-        data = _get_json(f"{IPWHO_API}{ip}")
-        if data and data.get("success"):
-            conn = data.get("connection") or {}
-            result["country_code"] = data.get("country_code")
-            result["domain"] = conn.get("domain")
-        result.update(_lookup_ipapi(ip))
+        for source in _enabled_sources(include_keyed):
+            try:
+                finding = source.lookup(ip)
+            except Exception:  # noqa: BLE001 - one bad source must not break the others
+                finding = None
+            if finding is not None:
+                result.append(finding)
 
     worker = threading.Thread(target=_work, daemon=True)
     worker.start()
     worker.join(timeout=LOOKUP_TIMEOUT)
-    return result or None
+    return list(result)
 
 
-def lookup_self() -> dict | None:
-    """Combined report for the caller's own public IP — used by the
-    on-demand 'IP Info' menu action (a single ad-hoc lookup, unlike the
-    background sweep this skips the cache and pacing entirely)."""
-    a = _get_json(IPWHO_API) or {}
-    b = _get_json(f"http://ip-api.com/json?fields={IPAPI_FIELDS}") or {}
-    if not a and not b:
-        return None
-    conn = a.get("connection") or {}
-    return {
-        "ip": a.get("ip") or b.get("query"),
-        "ipwho_country": a.get("country"),
-        "ipwho_org": conn.get("org"),
-        "ipapi_country": b.get("country"),
-        "ipapi_isp": b.get("isp"),
-        "ipapi_as": b.get("as"),
-        "hosting": bool(b.get("hosting")),
-        "proxy": bool(b.get("proxy")),
-        "mobile": bool(b.get("mobile")),
-    }
+def lookup_self(include_keyed: bool = True) -> list[IPFinding]:
+    """On-demand 'IP Info': detect the caller's own public IP once, then
+    every enabled source (keyed included by default) against that one
+    address — every source is asked about the SAME IP, rather than each
+    source's own "self-detect" endpoint potentially reporting a different
+    one. The source-querying phase is thread-guarded exactly like
+    lookup_host()'s: this feeds a synchronous, interactive menu action, so
+    up to 4 sources each with their own up-to-8s fetch_json timeout must
+    never add up to more than ~LOOKUP_TIMEOUT of total wall-clock time
+    (_detect_own_ip()'s own timeout chain, run before this guard starts,
+    is a separate, smaller, already-bounded cost)."""
+    ip = _detect_own_ip()
+    if not ip:
+        return []
+    findings: list[IPFinding] = []
+
+    def _work() -> None:
+        for source in _enabled_sources(include_keyed):
+            try:
+                finding = source.lookup(ip)
+            except Exception:  # noqa: BLE001 - one bad source must not break the others
+                finding = None
+            if finding is not None:
+                findings.append(finding)
+
+    worker = threading.Thread(target=_work, daemon=True)
+    worker.start()
+    worker.join(timeout=LOOKUP_TIMEOUT)
+    return list(findings)
 
 
 def _read() -> dict:
@@ -163,27 +198,28 @@ def request_update() -> None:
 def write_reputations(targets: list[tuple[str, str, int]]) -> None:
     """Measure and write the cache (single writer). Dedupes by host — many
     connections (e.g. Happ's rotating 'bridge' servers) share one host, so
-    each unique host is looked up once and the result fanned out to every
-    name that uses it. Paced between actual lookups (IPAPI_PACE) to stay
-    under ip-api.com's free-tier rate limit — this only runs in the
-    background, once a day, so the extra time doesn't matter."""
-    by_host: dict[str, dict | None] = {}
+    each unique host is looked up once (free sources only —
+    include_keyed=False) and the result fanned out to every name that uses
+    it. Paced between hosts (IPAPI_PACE) to stay under ip-api.com's
+    free-tier rate limit — this only runs in the background, once a day,
+    so the extra time doesn't matter."""
+    by_host: dict[str, list[IPFinding]] = {}
     entries: dict[str, dict] = {}
     for name, host, _port in targets:
         if host not in by_host:
             try:
-                by_host[host] = _lookup(host)
+                by_host[host] = lookup_host(host, include_keyed=False)
             except Exception:  # noqa: BLE001 - one bad host must not abort the sweep
-                by_host[host] = None
+                by_host[host] = []
             time.sleep(IPAPI_PACE)
-        result = by_host[host]
-        if result is None:
+        findings = by_host[host]
+        if not findings:
             continue
         entries[name] = {
             "at": time.time(),
-            "suspicious": is_suspicious(result),
-            "tags": _reason_tags(result),
-            "country_code": result.get("country_code"),
+            "suspicious": is_flagged(findings),
+            "tags": combined_tags(findings),
+            "country_code": findings[0].country_code,
         }
     entries["updated_at"] = time.time()
     try:
