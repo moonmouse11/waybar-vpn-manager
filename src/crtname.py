@@ -6,6 +6,7 @@ purely on-demand (no background polling), so its own rate limit
 normal use.
 """
 
+import http.client
 import json
 import urllib.parse
 import urllib.request
@@ -21,7 +22,7 @@ def search(domain: str) -> list[str] | None:
     try:
         with urllib.request.urlopen(url, timeout=TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return None
     if not isinstance(data, list):
         return None

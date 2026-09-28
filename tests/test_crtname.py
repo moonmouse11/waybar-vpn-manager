@@ -64,3 +64,18 @@ def test_search_url_encodes_the_domain(monkeypatch):
     monkeypatch.setattr(crtname.urllib.request, "urlopen", fake_urlopen)
     crtname.search("exa mple.com")
     assert "exa+mple.com" in captured["url"] or "exa%20mple.com" in captured["url"]
+
+
+def test_search_returns_none_on_incomplete_read(monkeypatch):
+    class _IncompleteResp:
+        def read(self):
+            raise crtname.http.client.IncompleteRead(partial=b"", expected=100)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(crtname.urllib.request, "urlopen", lambda url, timeout=8: _IncompleteResp())
+    assert crtname.search("example.com") is None

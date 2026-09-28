@@ -39,3 +39,21 @@ def test_measure_returns_none_on_zero_elapsed_time(monkeypatch):
     )
     monkeypatch.setattr(speedtest.time, "perf_counter", lambda: 100.0)  # same value twice
     assert speedtest.measure() is None
+
+
+def test_measure_returns_none_on_incomplete_read(monkeypatch):
+    class _IncompleteResp:
+        def read(self):
+            raise speedtest.http.client.IncompleteRead(partial=b"", expected=10_000_000)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        speedtest.urllib.request, "urlopen", lambda url, timeout=20: _IncompleteResp()
+    )
+    monkeypatch.setattr(speedtest.time, "perf_counter", lambda: 100.0)
+    assert speedtest.measure() is None

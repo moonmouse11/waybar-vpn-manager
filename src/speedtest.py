@@ -4,6 +4,7 @@ speed-test endpoint, no auth, the same one speed.cloudflare.com's own page
 uses.
 """
 
+import http.client
 import time
 import urllib.request
 
@@ -18,7 +19,7 @@ def measure() -> float | None:
         with urllib.request.urlopen(URL, timeout=TIMEOUT) as resp:
             n = len(resp.read())
         dt = time.perf_counter() - t0
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return None
     if dt <= 0:
         return None
