@@ -830,9 +830,135 @@ def test_dns_leak_server_row_falls_back_to_asn_without_org():
     assert "AS13335 CloudFlare Inc" in row[0]
 
 
+def _dns_leak_menu_env(monkeypatch, result, active=(), countries=None, ipv6_off=True):
+    """Wire dns_leak_test_menu()'s collaborators; returns the captured rows list."""
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    monkeypatch.setattr(vpn_manager.dnsleak, "run", lambda: result)
+    monkeypatch.setattr(vpn_manager, "active_connections", lambda providers=None: list(active))
+    monkeypatch.setattr(
+        vpn_manager.reputation, "country_of", lambda name: (countries or {}).get(name)
+    )
+    monkeypatch.setattr(vpn_manager.ipv6guard, "is_disabled", lambda: ipv6_off)
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    return seen
+
+
+def _leak_result(dns_servers, ip_country="DE", ip_asn=24940):
+    return {
+        "ip": "1.2.3.4",
+        "ip_country": ip_country,
+        "ip_asn": ip_asn,
+        "dns_servers": dns_servers,
+        "conclusion": "",
+    }
+
+
+def _wg(name):
+    return VPNConnection(name=name, provider="WireGuard", active=True)
+
+
+def test_dns_leak_server_row_adds_own_check_tags():
+    row = vpn_manager._dns_leak_server_row(
+        {"ip": "5.6.7.8", "country": "ru", "asn": "AS12389 Rostelecom"},
+        ip_country="DE",
+        ip_asn=24940,
+    )
+    assert row[0].endswith("⚠RU/ASN/GEO")
+
+
+def test_dns_leak_menu_own_verdict_flags_foreign_resolvers(monkeypatch):
+    seen = _dns_leak_menu_env(
+        monkeypatch,
+        _leak_result(
+            [
+                {"ip": "5.6.7.8", "country": "de", "asn": "AS3320 Telekom"},
+                {"ip": "172.69.50.15", "country": "nl", "asn": "AS13335 CloudFlare"},
+            ]
+        ),
+        active=[_wg("de1")],
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert any(r.startswith("⚠") and "1/2" in r for r in seen[0])
+
+
+def test_dns_leak_menu_own_verdict_clean(monkeypatch):
+    seen = _dns_leak_menu_env(
+        monkeypatch,
+        _leak_result([{"ip": "172.69.50.15", "country": "nl", "asn": "AS13335 CloudFlare"}]),
+        active=[_wg("de1")],
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert any(r.startswith("✅") and "DNS" in r for r in seen[0])
+
+
+def test_dns_leak_menu_no_own_verdict_without_exit_ip_data(monkeypatch):
+    seen = _dns_leak_menu_env(
+        monkeypatch,
+        _leak_result([{"ip": "9.9.9.9"}], ip_country="", ip_asn=None),
+        active=[_wg("de1")],
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert not any("DNS via" in r or "DNS outside" in r for r in seen[0])
+
+
+def test_dns_leak_menu_warns_when_no_vpn_active(monkeypatch):
+    seen = _dns_leak_menu_env(monkeypatch, _leak_result([]), active=[])
+    vpn_manager.dns_leak_test_menu()
+    assert any(r.startswith("⚠") and "No VPN" in r for r in seen[0])
+
+
+def test_dns_leak_menu_exit_country_matches_connection(monkeypatch):
+    seen = _dns_leak_menu_env(
+        monkeypatch, _leak_result([]), active=[_wg("de1")], countries={"de1": "DE"}
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert any(r.startswith("✅") and "de1" in r for r in seen[0])
+
+
+def test_dns_leak_menu_exit_country_mismatch(monkeypatch):
+    seen = _dns_leak_menu_env(
+        monkeypatch,
+        _leak_result([], ip_country="RU"),
+        active=[_wg("de1")],
+        countries={"de1": "DE"},
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert any(r.startswith("⚠") and "de1" in r and "🇩🇪" in r for r in seen[0])
+
+
+def test_dns_leak_menu_unknown_server_country_just_names_connection(monkeypatch):
+    seen = _dns_leak_menu_env(monkeypatch, _leak_result([]), active=[_wg("de1")])
+    vpn_manager.dns_leak_test_menu()
+    assert "VPN: de1" in seen[0]
+
+
+def test_dns_leak_menu_ipv6_row_warns_only_with_active_vpn(monkeypatch):
+    seen = _dns_leak_menu_env(monkeypatch, _leak_result([]), active=[_wg("de1")], ipv6_off=False)
+    vpn_manager.dns_leak_test_menu()
+    assert any(r.startswith("⚠") and "IPv6" in r for r in seen[0])
+
+    seen = _dns_leak_menu_env(monkeypatch, _leak_result([]), active=[], ipv6_off=False)
+    vpn_manager.dns_leak_test_menu()
+    assert "IPv6: enabled" in seen[0]
+
+
+def test_dns_leak_menu_ipv6_disabled_row(monkeypatch):
+    seen = _dns_leak_menu_env(monkeypatch, _leak_result([]), active=[_wg("de1")], ipv6_off=True)
+    vpn_manager.dns_leak_test_menu()
+    assert any(r.startswith("✅") and "IPv6" in r for r in seen[0])
+
+
 def test_dns_leak_test_menu_builds_result_rows(monkeypatch):
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    monkeypatch.setattr(vpn_manager, "active_connections", lambda providers=None: [])
+    monkeypatch.setattr(vpn_manager.ipv6guard, "is_disabled", lambda: False)
     monkeypatch.setattr(
         vpn_manager.dnsleak,
         "run",

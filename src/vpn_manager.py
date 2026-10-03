@@ -315,18 +315,62 @@ def _dns_leak_verdict_icon(conclusion: str) -> str:
     return ""
 
 
-def _dns_leak_server_row(server: dict) -> tuple[str, callable]:
+def _dns_leak_server_row(
+    server: dict, ip_country: str = "", ip_asn: int | None = None
+) -> tuple[str, callable]:
     """One row per detected resolver — the wider walker window (see
     WALKER_WIDTH) is the actual fix for these getting truncated; no need to
-    collapse the list to make it fit."""
-    flag = ipinfo.flag_emoji((server.get("country") or "").upper())
+    collapse the list to make it fit. Tags: RU from the shared reputation
+    heuristic, ASN/GEO from dnsleak.server_tags() against the exit IP."""
+    country = (server.get("country") or "").upper()
+    flag = ipinfo.flag_emoji(country)
     org = server.get("org") or server.get("asn") or ""
     label = f"{flag} {server.get('ip') or '?'}".strip()
     if org:
         label += f" · {org}"
-    if reputation.is_suspicious({"country_code": (server.get("country") or "").upper()}):
-        label += "  ⚠RU"
+    tags = reputation._reason_tags({"country_code": country})
+    tags += dnsleak.server_tags(server, ip_country, ip_asn)
+    if tags:
+        label += f"  ⚠{'/'.join(tags)}"
     return (label, lambda: ActionResult(True, ""))
+
+
+def _dns_leak_exit_row(ip_country: str, active: list[VPNConnection]) -> str:
+    """Does the public IP bash.ws saw fit the active connection? Compared by
+    country — the server's country comes from the reputation sweep's cache.
+    The exit IP legitimately differs from the endpoint (Happ bridges,
+    CDN-fronted xray), but a different country is a real red flag."""
+    if not active:
+        return "⚠ No VPN active — this is your real IP"
+    known = [(c.name, reputation.country_of(c.name)) for c in active]
+    known = [(name, cc) for name, cc in known if cc]
+    if not known:
+        return f"VPN: {active[0].name}"
+    for name, cc in known:
+        if cc == ip_country:
+            return f"✅ Exit matches {name} {ipinfo.flag_emoji(cc)}"
+    name, cc = known[0]
+    return f"⚠ Exit ≠ {name} {ipinfo.flag_emoji(cc)}"
+
+
+def _dns_leak_ipv6_row(vpn_active: bool) -> str:
+    if ipv6guard.is_disabled():
+        return "✅ IPv6: disabled"
+    return "⚠ IPv6: enabled — bypasses the tunnel" if vpn_active else "IPv6: enabled"
+
+
+def _dns_leak_verdict_row(result: dict) -> str | None:
+    """Own verdict over every resolver, shown next to bash.ws's. None when
+    the exit IP's country and ASN are both unknown — server_tags() would
+    then flag nobody, and a ✅ built on no data would be a lie."""
+    servers = result["dns_servers"]
+    ip_country, ip_asn = result["ip_country"], result.get("ip_asn")
+    if not servers or not (ip_country or ip_asn):
+        return None
+    flagged = sum(1 for s in servers if dnsleak.server_tags(s, ip_country, ip_asn))
+    if flagged:
+        return f"⚠ {flagged}/{len(servers)} DNS outside VPN/public resolvers"
+    return "✅ DNS via VPN or public resolvers"
 
 
 def dns_leak_test_menu() -> ActionResult:
@@ -339,14 +383,21 @@ def dns_leak_test_menu() -> ActionResult:
     if result is None:
         return ActionResult(False, "Не удалось выполнить проверку — нет сети?")
 
+    active = active_connections()
+    ip_country, ip_asn = result["ip_country"], result.get("ip_asn")
     items: list[tuple[str, callable]] = []
     if result["ip"]:
-        flag = ipinfo.flag_emoji(result["ip_country"])
+        flag = ipinfo.flag_emoji(ip_country)
         items.append((f"IP: {result['ip']} {flag}".strip(), lambda: ActionResult(True, "")))
+    items.append((_dns_leak_exit_row(ip_country, active), lambda: ActionResult(True, "")))
+    items.append((_dns_leak_ipv6_row(bool(active)), lambda: ActionResult(True, "")))
     if result["dns_servers"]:
-        items.extend(_dns_leak_server_row(s) for s in result["dns_servers"])
+        items.extend(_dns_leak_server_row(s, ip_country, ip_asn) for s in result["dns_servers"])
     else:
         items.append(("No DNS servers found", lambda: ActionResult(True, "")))
+    verdict = _dns_leak_verdict_row(result)
+    if verdict:
+        items.append((verdict, lambda: ActionResult(True, "")))
     if result["conclusion"]:
         icon = _dns_leak_verdict_icon(result["conclusion"])
         items.append((f"{icon}{result['conclusion']}", lambda: ActionResult(True, "")))

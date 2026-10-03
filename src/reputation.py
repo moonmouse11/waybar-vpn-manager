@@ -182,6 +182,16 @@ def mark(name: str) -> str:
     return f" ⚠{'/'.join(tags)}" if tags else ""
 
 
+def country_of(name: str) -> str | None:
+    """Upper-case country code of a connection's server from the last sweep,
+    or None if never measured. Ignores MAX_AGE on purpose: unlike the
+    tags, a server's country practically never changes between sweeps."""
+    entry = _read().get(name)
+    if not isinstance(entry, dict):
+        return None
+    return (entry.get("country_code") or "").upper() or None
+
+
 def request_update() -> None:
     """Fire-and-forget background sweep if the cache is stale."""
     cache = _read()
