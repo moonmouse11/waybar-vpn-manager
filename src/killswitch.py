@@ -45,7 +45,9 @@ def mode() -> str:
     return config.load_config().killswitch_mode
 
 
-def enable(extra_ips: list[str] | None = None, ifaces: list[str] | None = None) -> ActionResult:
+def enable(
+    extra_ips: list[str] | None = None, ifaces: list[str] | None = None, fresh: bool = False
+) -> ActionResult:
     """Enable the killswitch, re-detecting Happ server IPs first (they
     change when the user switches servers).
 
@@ -53,7 +55,18 @@ def enable(extra_ips: list[str] | None = None, ifaces: list[str] | None = None) 
     WireGuard/OpenVPN endpoint addresses and tunnel interface names.
     extra_ips=None means happ-only mode, where a failed detect is fatal;
     in "all" mode a failed detect is tolerated (Happ may simply be
-    disconnected) and any stale conf IPs are merged in by the script."""
+    disconnected) and any stale conf IPs are merged in by the script.
+
+    fresh=True means extra_ips are already the complete, known server set:
+    skip `detect` (it scrapes every established TCP session on the physical
+    NIC — split-tunnel "direct" sites included, while UDP transports like
+    hysteria never show up) and tell the script not to merge the saved conf
+    (whatever server was detected last time)."""
+    if fresh:
+        args = ["on", "--no-conf", *(extra_ips or [])]
+        for iface in ifaces or []:
+            args += ["--iface", iface]
+        return _sudo(*args)
     detect = _sudo("detect")
     if not detect.success and extra_ips is None:
         return detect
@@ -103,11 +116,13 @@ def resume_for_happ(extra_ips: list[str] | None = None) -> ActionResult | None:
     connect), so the caller passes it explicitly. Returns None when there
     is nothing to do."""
     if extra_ips is not None:
-        # rebuild the rules around the known server address
-        if is_enabled():
-            return enable(extra_ips=extra_ips)
-        if mode() in ("happ", "all"):
-            return enable(extra_ips=extra_ips)
+        # rebuild the rules around the known server addresses; a non-empty
+        # list is the complete set, so skip detect/saved IPs (fresh)
+        kwargs: dict = {"extra_ips": extra_ips}
+        if extra_ips:
+            kwargs["fresh"] = True
+        if is_enabled() or mode() in ("happ", "all"):
+            return enable(**kwargs)
         return None
     if is_enabled():
         return redetect()
