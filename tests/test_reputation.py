@@ -217,9 +217,13 @@ def test_lookup_self_bounds_total_time_when_a_source_hangs(monkeypatch):
     assert findings == []  # the hung source never got to append its finding in time
 
 
-def test_detect_own_ip_primary_source(monkeypatch):
+def test_detect_own_ip_primary_source(monkeypatch, tmp_path):
     # _detect_own_ip() now delegates to ipsources.base.fetch_json instead of
     # a private, duplicated _get_json helper.
+    # Hermetic config: _ipwho_bootstrap_enabled() reads config.json, and a
+    # real host config with ipwhois disabled would skip the patched
+    # fetch_json and fall through to a real urlopen(ifconfig.me).
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(
         reputation, "fetch_json", lambda url, timeout=6: {"success": True, "ip": "1.2.3.4"}
     )
@@ -255,7 +259,9 @@ def test_detect_own_ip_skips_ipwho_when_source_disabled(monkeypatch, tmp_path):
     assert reputation.IPWHO_API not in calls
 
 
-def test_detect_own_ip_falls_back_on_primary_failure(monkeypatch):
+def test_detect_own_ip_falls_back_on_primary_failure(monkeypatch, tmp_path):
+    # Hermetic config, same rationale as test_detect_own_ip_primary_source.
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(reputation, "fetch_json", lambda url, timeout=6: None)
 
     class _Resp:

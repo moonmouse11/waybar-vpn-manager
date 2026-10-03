@@ -239,11 +239,13 @@ def _sub_cache_path(sub_id: str) -> Path:
     return SUB_CACHE_DIR / f"subscription-{safe_id}.json"
 
 
-def fetch_subscription(sub_id: str, url: str) -> list[dict]:
+def fetch_subscription(sub_id: str, url: str, force: bool = False) -> list[dict]:
     """Server configs from the provider, cached for SUB_MAX_AGE.
 
     Falls back to the last good cache when the fetch fails or the provider
-    answers with the anti-curl stub.
+    answers with the anti-curl stub. force=True skips the fresh-cache early
+    return (the Refresh All menu action); the default keeps the SUB_MAX_AGE
+    gate the --status path relies on.
     """
     cache_path = _sub_cache_path(sub_id)
     try:
@@ -255,7 +257,8 @@ def fetch_subscription(sub_id: str, url: str) -> list[dict]:
     # fresh cache fetched with the old url. Records without "url" predate
     # this scheme and are treated as matching (no mass refetch).
     if (
-        isinstance(cached, dict)
+        not force
+        and isinstance(cached, dict)
         and cached.get("url", url) == url
         and time.time() - cached.get("at", 0) < SUB_MAX_AGE
     ):
@@ -427,15 +430,18 @@ def request_subscription_update() -> None:
             return
 
 
-def update_subscriptions() -> None:
-    """Background entry point: refresh every subscription cache."""
+def update_subscriptions(force: bool = False) -> None:
+    """Background entry point: refresh every subscription cache.
+    force=True (Refresh All's --update-subs-force) re-fetches even caches
+    younger than SUB_MAX_AGE; the default --update-subs run keeps the gate."""
     # stamped first, even when fetches fail below: single-flight for the tick
     _stamp_subs_refresh()
     for sub_id, prov in providers().items():
         url = prov.get("url")
         if url:
             with contextlib.suppress(OSError, AttributeError, ValueError):
-                fetch_subscription(sub_id, url)  # one failing provider must not stop the others
+                # one failing provider must not stop the others
+                fetch_subscription(sub_id, url, force=force)
 
 
 # ── Config merge (subscription config -> runnable xray config) ────────────────

@@ -408,7 +408,7 @@ def test_update_subscriptions_stamps_marker_even_on_failure(tmp_path, monkeypatc
     _fake_providers(monkeypatch, tmp_path, {"1": {"name": "P", "url": "https://x/1"}})
     monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)
 
-    def boom(sub_id, url):
+    def boom(sub_id, url, force=False):
         raise OSError("network down")
 
     monkeypatch.setattr(happmeta, "fetch_subscription", boom)
@@ -440,6 +440,72 @@ def test_fetch_subscription_cache_is_private(tmp_path, monkeypatch):
     servers = happmeta.fetch_subscription("1", "https://x/1")
     assert [s["remarks"] for s in servers] == ["S"]
     assert (os.stat(tmp_path / "subscription-1.json").st_mode & 0o777) == 0o600
+
+
+def _fresh_sub_cache(tmp_path, monkeypatch):
+    """A younger-than-SUB_MAX_AGE cache + captured headers, urlopen recorded."""
+    monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)
+    (tmp_path / "subscription-1.json").write_text(
+        json.dumps(
+            {
+                "at": time.time(),
+                "url": "https://x/1",
+                "servers": [{"remarks": "Cached", "outbounds": [{}]}],
+            }
+        )
+    )
+    headers_file = tmp_path / "headers.json"
+    headers_file.write_text(json.dumps({"User-Agent": "Happ/1.0"}))
+    monkeypatch.setattr(happmeta, "HEADERS_FILE", headers_file)
+
+    calls = []
+
+    class FakeResp:
+        def read(self):
+            return json.dumps([{"remarks": "Fetched", "outbounds": [{}]}]).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        happmeta.urllib.request,
+        "urlopen",
+        lambda req, timeout: calls.append(req) or FakeResp(),
+    )
+    return calls
+
+
+def test_fetch_subscription_fresh_cache_skips_network_by_default(tmp_path, monkeypatch):
+    calls = _fresh_sub_cache(tmp_path, monkeypatch)
+    servers = happmeta.fetch_subscription("1", "https://x/1")
+    assert [s["remarks"] for s in servers] == ["Cached"]
+    assert calls == []  # SUB_MAX_AGE gate respected
+
+
+def test_fetch_subscription_force_refetches_fresh_cache(tmp_path, monkeypatch):
+    calls = _fresh_sub_cache(tmp_path, monkeypatch)
+    servers = happmeta.fetch_subscription("1", "https://x/1", force=True)
+    assert [s["remarks"] for s in servers] == ["Fetched"]
+    assert len(calls) == 1  # fresh cache re-fetched under the forced path
+
+
+def test_update_subscriptions_threads_force_through(tmp_path, monkeypatch):
+    _fake_providers(monkeypatch, tmp_path, {"1": {"name": "P", "url": "https://x/1"}})
+    monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)
+    seen = []
+    monkeypatch.setattr(
+        happmeta,
+        "fetch_subscription",
+        lambda sub_id, url, force=False: seen.append(force) or [],
+    )
+    happmeta.update_subscriptions(force=True)
+    assert seen == [True]
+    seen.clear()
+    happmeta.update_subscriptions()
+    assert seen == [False]  # default keeps the staleness gate
 
 
 def test_server_params_and_ping_cache(tmp_path, monkeypatch):
