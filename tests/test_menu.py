@@ -1092,7 +1092,9 @@ def test_refresh_all_menu_spawns_ping_and_subs_unconditionally(monkeypatch):
     assert result.success
     flags = [c[2] for c in calls]  # [sys.executable, script_path, flag]
     assert "--update-ping" in flags
-    assert "--update-subs" in flags
+    # the forced variant — plain --update-subs would keep the SUB_MAX_AGE
+    # gate inside fetch_subscription and no-op on a fresh cache
+    assert "--update-subs-force" in flags
 
 
 def test_clear_caches_menu_removes_only_json_files(tmp_path, monkeypatch):

@@ -38,6 +38,43 @@ def test_terminal_prompter_text_strips_input(monkeypatch):
     assert vpn_manager.TerminalPrompter().text("Key?") == "secret-key"
 
 
+def test_terminal_prompter_confirm_returns_default_on_eof_and_interrupt(monkeypatch):
+    """A non-interactive --configure (e.g. under install.sh's set -e) must
+    not turn a successful install into a reported failure: EOFError and
+    KeyboardInterrupt on input() fall back to the question's default."""
+
+    def raise_eof(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    assert vpn_manager.TerminalPrompter().confirm("Q?", default=True) is True
+    assert vpn_manager.TerminalPrompter().confirm("Q?", default=False) is False
+
+    def raise_interrupt(prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", raise_interrupt)
+    assert vpn_manager.TerminalPrompter().confirm("Q?", default=True) is True
+    assert vpn_manager.TerminalPrompter().confirm("Q?", default=False) is False
+
+
+def test_terminal_prompter_text_returns_empty_on_eof_and_interrupt(monkeypatch):
+    """Same guard for getpass-based text(): an interrupted API-key prompt
+    yields "" (keep existing / skip), not an exception."""
+
+    def raise_eof(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(vpn_manager.getpass, "getpass", raise_eof)
+    assert vpn_manager.TerminalPrompter().text("Key?") == ""
+
+    def raise_interrupt(prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(vpn_manager.getpass, "getpass", raise_interrupt)
+    assert vpn_manager.TerminalPrompter().text("Key?") == ""
+
+
 def test_walker_prompter_confirm_maps_selection(monkeypatch):
     monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": "Да")
     assert vpn_manager.WalkerPrompter().confirm("Q?", default=False) is True

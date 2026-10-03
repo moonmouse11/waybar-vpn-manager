@@ -409,7 +409,7 @@ def refresh_all_menu() -> ActionResult:
         start_new_session=True,
     )
     subprocess.Popen(
-        [sys.executable, str(Path(__file__)), "--update-subs"],
+        [sys.executable, str(Path(__file__)), "--update-subs-force"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -1037,6 +1037,11 @@ def main():
         help="Refresh Happ subscription caches in the background (internal)",
     )
     group.add_argument(
+        "--update-subs-force",
+        action="store_true",
+        help="Like --update-subs but bypassing the SUB_MAX_AGE cache gate (Refresh All)",
+    )
+    group.add_argument(
         "--update-reputation",
         action="store_true",
         help="Refresh server IP-reputation cache in the background (internal)",
@@ -1063,6 +1068,8 @@ def main():
         reputation.write_reputations(_collect_ping_targets())
     elif args.update_subs:
         happmeta.update_subscriptions()
+    elif args.update_subs_force:
+        happmeta.update_subscriptions(force=True)
     elif args.happ_keeper is not None:
         from providers.happ import run_keeper
 
