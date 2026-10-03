@@ -814,3 +814,39 @@ def test_fmt_traffic_limit_expire():
     assert happmeta.fmt_expire(1797232846) == "14.12.2026"
     assert happmeta.fmt_expire(None) == "?"
     assert happmeta.fmt_expire(10**30) == "?"  # out of range must not raise
+
+
+_CLASH = [
+    {"name": "🇩🇪 Germany", "provider_id": "1", "provider_name": "P1", "config": {"remarks": "a"}},
+    {"name": "🇩🇪 Germany", "provider_id": "2", "provider_name": "P2", "config": {"remarks": "b"}},
+]
+
+
+def test_match_server_picks_requested_provider_on_name_clash():
+    assert happmeta.match_server("🇩🇪 Germany", _CLASH, provider_id="2") is _CLASH[1]
+    assert happmeta.match_server("🇩🇪 Germany", _CLASH, provider_id="1") is _CLASH[0]
+
+
+def test_match_server_without_provider_keeps_first_match():
+    assert happmeta.match_server("🇩🇪 Germany", _CLASH) is _CLASH[0]
+
+
+def test_match_server_unknown_provider_falls_back_to_name():
+    # a subscription can vanish/re-key after connecting — still find the server
+    assert happmeta.match_server("🇩🇪 Germany", _CLASH, provider_id="gone") is _CLASH[0]
+
+
+def test_resolve_config_uses_requested_provider(tmp_path, monkeypatch):
+    a = {"remarks": "S", "outbounds": [{"protocol": "vless", "tag": "proxy", "x": "a"}]}
+    b = {"remarks": "S", "outbounds": [{"protocol": "vless", "tag": "proxy", "x": "b"}]}
+    _fake_providers(
+        monkeypatch,
+        tmp_path,
+        {"1": {"name": "P1", "url": "https://x/1"}, "2": {"name": "P2", "url": "https://x/2"}},
+    )
+    monkeypatch.setattr(
+        happmeta, "fetch_subscription", lambda sub_id, url: [a] if sub_id == "1" else [b]
+    )
+    monkeypatch.setattr(happmeta, "XRAY_CONFIGS", tmp_path / "none.json")
+    cfg = happmeta.resolve_config("S", provider_id="2")
+    assert any(o.get("x") == "b" for o in cfg["outbounds"])

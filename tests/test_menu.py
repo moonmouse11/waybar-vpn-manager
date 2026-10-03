@@ -103,7 +103,7 @@ def test_happ_provider_menu_disambiguates_duplicate_labels(monkeypatch):
     )
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [provider])
     monkeypatch.setattr(vpn_manager.happmeta, "server_info_suffix", lambda name: "")
-    monkeypatch.setattr(vpn_manager.happmeta, "server_params", lambda name, allow_fetch=False: None)
+    monkeypatch.setattr(vpn_manager.happmeta, "server_params", lambda name, **kw: None)
     monkeypatch.setattr(vpn_manager.killswitch, "resume_for_happ", lambda extra_ips=None: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
@@ -489,7 +489,7 @@ def test_happ_connect_passes_resolved_server_ip(monkeypatch, tmp_path):
     monkeypatch.setattr(
         vpn_manager.happmeta,
         "server_params",
-        lambda name, allow_fetch=True: {"host": "de.example.com", "port": 443},
+        lambda name, **kw: {"host": "de.example.com", "port": 443},
     )
     monkeypatch.setattr(
         vpn_manager.killswitch, "resolve_endpoint_ips", lambda t: ["2.26.86.35"]
@@ -1244,3 +1244,55 @@ def test_clear_caches_menu_tolerates_missing_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(vpn_manager, "CACHE_DIR", tmp_path / "does-not-exist")
     result = vpn_manager.clear_caches_menu()
     assert result.success
+
+
+def test_happ_menu_name_clash_marks_only_active_provider(monkeypatch, tmp_path):
+    servers = [
+        {"name": "🇩🇪 Germany", "provider_name": "P1", "provider_id": "1", "config": {}},
+        {"name": "🇩🇪 Germany", "provider_name": "P2", "provider_id": "2", "config": {}},
+    ]
+    active = VPNConnection(name="🇩🇪 Germany", provider="Happ", active=True, subscription_id="2")
+    provider = FakeProvider("Happ", [active])
+    monkeypatch.setattr(vpn_manager.happmeta, "request_ping_update", lambda: None)
+    monkeypatch.setattr(vpn_manager.happmeta, "request_subscription_update", lambda: None)
+    monkeypatch.setattr(vpn_manager.reputation, "request_update", lambda: None)
+    monkeypatch.setattr(vpn_manager.happmeta, "all_servers", lambda allow_fetch=True: servers)
+    monkeypatch.setattr(vpn_manager.happmeta, "PING_CACHE", tmp_path / "ping.json")
+    seen = []
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+    )
+    vpn_manager.happ_menu(provider)
+    assert "P2  (1/1)" in seen[0]
+    assert "P1" in seen[0]  # no active suffix for the same-named P1 server
+
+
+def test_happ_provider_menu_connects_with_subscription_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(vpn_manager.happmeta, "PING_CACHE", tmp_path / "ping.json")
+    monkeypatch.setattr(vpn_manager.happmeta, "server_params", lambda name, **kw: None)
+    monkeypatch.setattr(vpn_manager.happmeta, "subscription_info", lambda sub_id: None)
+    monkeypatch.setattr(vpn_manager.reputation, "mark", lambda name: "")
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    got = []
+    monkeypatch.setattr(
+        vpn_manager, "guarded_connect", lambda p, c: got.append(c) or ActionResult(True, "")
+    )
+    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": "🇩🇪 Germany")
+    entries = [{"name": "🇩🇪 Germany", "active": False, "provider_id": "2"}]
+    vpn_manager.happ_provider_menu(FakeProvider("Happ", []), "P2", entries)
+    assert (got[0].subscription_id, got[0].subscription_name) == ("2", "P2")
+
+
+def test_main_menu_current_connection_shows_subscription(monkeypatch):
+    conn = VPNConnection(
+        name="🇩🇪 Germany", provider="Happ", active=True, subscription_name="Wirecat"
+    )
+    monkeypatch.setattr(vpn_manager, "iface_rate", lambda iface: "")
+    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: config.Config())
+    monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda name, age: None)
+    monkeypatch.setattr(vpn_manager, "request_ip_update", lambda name: None)
+    rows = vpn_manager._current_connection_items(conn)
+    assert rows[0][0] == "↻ Happ · Wirecat: 🇩🇪 Germany"

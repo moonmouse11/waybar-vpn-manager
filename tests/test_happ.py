@@ -88,7 +88,7 @@ def _run_keeper_env(tmp_path, monkeypatch, sock, cfg):
 
     monkeypatch.setattr(happ, "KEEPER_STATE", tmp_path / "keeper.json")
     monkeypatch.setattr(happ, "_write_keeper_state", recording)
-    monkeypatch.setattr(happmeta, "resolve_config", lambda name: cfg)
+    monkeypatch.setattr(happmeta, "resolve_config", lambda name, **kw: cfg)
     monkeypatch.setattr(happ, "_open_session", lambda: sock)
     monkeypatch.setattr(happ, "_routing_asset_dir", lambda: None)
     monkeypatch.setattr(happ, "_iface_exists", lambda name: True)
@@ -110,7 +110,7 @@ def _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg):
 
     monkeypatch.setattr(happ, "KEEPER_STATE", tmp_path / "keeper.json")
     monkeypatch.setattr(happ, "_write_keeper_state", recording)
-    monkeypatch.setattr(happmeta, "resolve_config", lambda name: cfg)
+    monkeypatch.setattr(happmeta, "resolve_config", lambda name, **kw: cfg)
     monkeypatch.setattr(happ, "_open_session", factory)
     monkeypatch.setattr(happ, "_routing_asset_dir", lambda: None)
     monkeypatch.setattr(happ, "_iface_exists", lambda name: False)
@@ -276,7 +276,9 @@ def _patch_env(monkeypatch, tmp_path, servers, interfaces, processes, last, keep
 
     monkeypatch.setattr(happmeta, "all_servers", lambda *a, **k: servers)
     monkeypatch.setattr(happmeta, "request_subscription_update", lambda: None)
-    monkeypatch.setattr(happmeta, "resolve_config", lambda name: _server(name) if name else None)
+    monkeypatch.setattr(
+        happmeta, "resolve_config", lambda name, **kw: _server(name) if name else None
+    )
     monkeypatch.setattr(happ, "_happ_interfaces", lambda: interfaces)
     monkeypatch.setattr(happ, "_daemon_running_processes", lambda fresh=False: processes)
     monkeypatch.setattr(happ, "_last_server_name", lambda: last)
@@ -405,3 +407,86 @@ def test_tun_interface_name():
     }
     assert happ._tun_interface_name(cfg) == "happ-xray"
     assert happ._tun_interface_name({"inbounds": [{"protocol": "socks"}]}) is None
+
+
+_CLASH = [
+    {"name": "🇩🇪 Germany", "provider_id": "1", "provider_name": "P1", "config": {}},
+    {"name": "🇩🇪 Germany", "provider_id": "2", "provider_name": "P2", "config": {}},
+]
+
+
+def test_connections_carry_subscription_identity(tmp_path, monkeypatch):
+    _patch_env(monkeypatch, tmp_path, _CLASH, [], [], None, None)
+    conns = happ.HappProvider().connections()
+    assert [(c.subscription_id, c.subscription_name) for c in conns] == [("1", "P1"), ("2", "P2")]
+
+
+def test_connections_name_clash_marks_only_keeper_provider(tmp_path, monkeypatch):
+    keeper = {"status": "connected", "server": "🇩🇪 Germany", "provider_id": "2"}
+    _patch_env(monkeypatch, tmp_path, _CLASH, ["happ-xray"], ["xray-core"], None, keeper)
+    conns = happ.HappProvider().connections()
+    assert [c.subscription_id for c in conns if c.active] == ["2"]
+
+
+def test_connections_name_clash_without_provider_marks_one(tmp_path, monkeypatch):
+    # old keeper state / GUI connect: no provider_id — never light up both
+    keeper = {"status": "connected", "server": "🇩🇪 Germany"}
+    _patch_env(monkeypatch, tmp_path, _CLASH, ["happ-xray"], ["xray-core"], None, keeper)
+    conns = happ.HappProvider().connections()
+    assert len([c for c in conns if c.active]) == 1
+
+
+def test_run_keeper_resolves_and_records_provider(tmp_path, monkeypatch):
+    import happmeta
+
+    sock = FakeSock(_frame({"request-id": "wm-12345", "status": "started"}))
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+    writes = _run_keeper_env(tmp_path, monkeypatch, sock, cfg)
+    asked = []
+    monkeypatch.setattr(
+        happmeta, "resolve_config", lambda name, **kw: asked.append(kw.get("provider_id")) or cfg
+    )
+
+    happ.run_keeper("S", "2")
+
+    assert asked == ["2"]
+    connected = next(w for w in writes if w["status"] == "connected")
+    assert connected["provider_id"] == "2"
+
+
+def test_connect_passes_provider_to_resolve_and_keeper(tmp_path, monkeypatch):
+    import happmeta
+    from providers.base import ActionResult, VPNConnection
+
+    asked = []
+    monkeypatch.setattr(
+        happmeta,
+        "resolve_config",
+        lambda name, **kw: asked.append(kw.get("provider_id")) or {"remarks": name},
+    )
+    prov = happ.HappProvider()
+    monkeypatch.setattr(prov, "_stop_running", lambda: None)
+    keeper_calls = []
+    monkeypatch.setattr(
+        prov,
+        "_headless_connect",
+        lambda name, provider_id=None: keeper_calls.append((name, provider_id))
+        or ActionResult(True, "ok"),
+    )
+    conn = VPNConnection(name="S", provider="Happ", active=False, subscription_id="2")
+    assert prov.connect(conn).success
+    assert asked == ["2"]
+    assert keeper_calls == [("S", "2")]
+
+
+def test_headless_connect_passes_provider_on_command_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(happ, "KEEPER_STATE", tmp_path / "keeper.json")
+    spawned = []
+
+    def fake_popen(cmd, **kw):
+        spawned.append(cmd)
+        (tmp_path / "keeper.json").write_text(json.dumps({"status": "connected", "server": "S"}))
+
+    monkeypatch.setattr(happ.subprocess, "Popen", fake_popen)
+    assert happ.HappProvider()._headless_connect("S", "2").success
+    assert spawned[0][-3:] == ["--happ-keeper", "S", "2"]

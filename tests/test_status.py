@@ -64,3 +64,27 @@ def test_no_traffic_when_no_interface(monkeypatch):
     patch_env(monkeypatch, [FakeProvider("Happ", [conn])], traffic=None)
     status = vpn_manager.get_status()
     assert "↓" not in status["tooltip"]
+
+
+def test_connection_label_with_and_without_subscription():
+    plain = VPNConnection(name="nl", provider="WireGuard", active=True)
+    happ = VPNConnection(
+        name="🇩🇪 Germany", provider="Happ", active=True, subscription_name="Wirecat"
+    )
+    assert plain.label == "WireGuard: nl"
+    assert happ.label == "Happ · Wirecat: 🇩🇪 Germany"
+
+
+def test_happ_status_shows_subscription_provider(monkeypatch):
+    conn = VPNConnection(
+        name="🇩🇪 Germany",
+        provider="Happ",
+        active=True,
+        interface="happ-xray",
+        subscription_id="1",
+        subscription_name="Wirecat",
+    )
+    patch_env(monkeypatch, [FakeProvider("Happ", [conn])])
+    status = vpn_manager.get_status()
+    assert status["text"] == " Happ · Wirecat: 🇩🇪 Germany"
+    assert "Happ · Wirecat: 🇩🇪 Germany" in status["tooltip"]
