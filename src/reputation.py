@@ -38,10 +38,8 @@ MANAGER = Path(__file__).resolve().parent / "vpn_manager.py"
 
 
 def _reason_tags(entry: dict) -> list[str]:
-    """Which criteria this entry tripped, in display order. Takes a plain
-    dict (not an IPFinding) — this is also called directly by ipinfo.py's
-    status_line() and vpn_manager._dns_leak_server_row(), each building an
-    ad-hoc dict from a data source unrelated to ipsources."""
+    """Which criteria this entry tripped, in display order (plain dict, so
+    combined_tags() can feed it vars(IPFinding))."""
     tags = []
     domain = (entry.get("domain") or "").lower()
     if entry.get("country_code") == "RU" or domain.endswith((".ru", ".su")):
@@ -51,10 +49,6 @@ def _reason_tags(entry: dict) -> list[str]:
     if entry.get("proxy"):
         tags.append("PROXY")
     return tags
-
-
-def is_suspicious(entry: dict) -> bool:
-    return bool(_reason_tags(entry))
 
 
 def combined_tags(findings: list[IPFinding]) -> list[str]:
@@ -82,8 +76,7 @@ def _ipwho_bootstrap_enabled() -> bool:
 def _detect_own_ip() -> str | None:
     """Bootstrap for lookup_self(): the same ipwho.is-then-ifconfig.me
     fallback chain ipinfo.py uses for its own exit-IP cache, duplicated
-    here (not imported) — ipinfo.py already imports reputation for
-    is_suspicious(), so importing ipinfo back would be circular. Skips
+    here (not imported) so the two modules stay independent. Skips
     ipwho.is when the user disabled ipwho.is in config."""
     if _ipwho_bootstrap_enabled():
         data = fetch_json(IPWHO_API, timeout=6)
@@ -168,18 +161,6 @@ def _read() -> dict:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def mark(name: str) -> str:
-    """' ⚠RU/DC' for a flagged connection (only the tags that actually
-    tripped), '' otherwise — including a connection never measured yet, so
-    the menu stays quiet before the first sweep completes rather than
-    marking everything as unknown."""
-    entry = _read().get(name)
-    if not isinstance(entry, dict) or time.time() - entry.get("at", 0) > MAX_AGE:
-        return ""
-    tags = entry.get("tags") or []
-    return f" ⚠{'/'.join(tags)}" if tags else ""
 
 
 def country_of(name: str) -> str | None:

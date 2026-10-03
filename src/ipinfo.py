@@ -14,7 +14,6 @@ import urllib.request
 from pathlib import Path
 
 import logutil
-import reputation
 
 CACHE_PATH = Path.home() / ".cache" / "vpn-manager" / "exit_ip.json"
 # ipwho.is gives IP + country in one request; ifconfig.me is the plain-IP fallback
@@ -54,8 +53,6 @@ def status_line(connection: str, max_age: int) -> str | None:
     flag = flag_emoji(cache.get("country_code"))
     if flag:
         line += f" {flag}"
-    if reputation.is_suspicious(cache):
-        line += " ⚠RU"
     return line
 
 

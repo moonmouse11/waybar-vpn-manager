@@ -59,7 +59,7 @@ def _split_host_port(value: str, default_port: int) -> tuple[str, int] | None:
     return v, default_port
 
 
-_NO_DNS_WARNING = " — ⚠ no DNS= in [Interface], DNS may not route through the tunnel"
+_NO_DNS_WARNING = " — warning: no DNS= in [Interface], DNS may not route through the tunnel"
 
 
 def _has_dns_directive(path: Path) -> bool:

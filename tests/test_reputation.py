@@ -6,27 +6,6 @@ import reputation
 from ipsources.base import IPFinding
 
 
-def test_is_suspicious_country_ru():
-    assert reputation.is_suspicious({"country_code": "RU", "domain": "example.com"})
-
-
-def test_is_suspicious_domain_tld():
-    assert reputation.is_suspicious({"country_code": "DE", "domain": "dhost.su"})
-    assert reputation.is_suspicious({"country_code": "DE", "domain": "baxet.ru"})
-
-
-def test_is_suspicious_hosting_or_proxy():
-    assert reputation.is_suspicious({"country_code": "DE", "hosting": True})
-    assert reputation.is_suspicious({"country_code": "FR", "proxy": True})
-
-
-def test_is_suspicious_clean():
-    assert not reputation.is_suspicious({"country_code": "DE", "domain": "play2go.cloud"})
-    assert not reputation.is_suspicious({"country_code": "DE", "domain": None})
-    assert not reputation.is_suspicious({})
-    assert not reputation.is_suspicious({"country_code": "DE", "hosting": False, "proxy": False})
-
-
 def test_reason_tags_order_and_combination():
     assert reputation._reason_tags({"country_code": "RU"}) == ["RU"]
     assert reputation._reason_tags({"hosting": True}) == ["DC"]
@@ -37,32 +16,10 @@ def test_reason_tags_order_and_combination():
     assert reputation._reason_tags({}) == []
 
 
-def test_mark_missing_or_stale_is_silent(tmp_path, monkeypatch):
-    p = tmp_path / "reputation.json"
-    monkeypatch.setattr(reputation, "CACHE", p)
-    assert reputation.mark("nl") == ""
-
-    p.write_text(
-        json.dumps({"nl": {"at": time.time() - reputation.MAX_AGE - 1, "suspicious": True}})
-    )
-    assert reputation.mark("nl") == ""
 
 
-def test_mark_fresh_suspicious_and_clean(tmp_path, monkeypatch):
-    p = tmp_path / "reputation.json"
-    monkeypatch.setattr(reputation, "CACHE", p)
-    p.write_text(
-        json.dumps(
-            {
-                "bad": {"at": time.time(), "suspicious": True, "tags": ["RU"]},
-                "hosted": {"at": time.time(), "suspicious": True, "tags": ["DC", "PROXY"]},
-                "good": {"at": time.time(), "suspicious": False, "tags": []},
-            }
-        )
-    )
-    assert reputation.mark("bad") == " ⚠RU"
-    assert reputation.mark("hosted") == " ⚠DC/PROXY"
-    assert reputation.mark("good") == ""
+
+
 
 
 def test_request_update_throttles(tmp_path, monkeypatch):
