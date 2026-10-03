@@ -304,14 +304,16 @@ def _recv_frame(sock: socket.socket) -> dict | None:
         return None
 
 
-def run_keeper(server_name: str | None = None) -> None:
+def run_keeper(server_name: str | None = None, provider_id: str | None = None) -> None:
     """Long-lived happd session that owns the xray process.
 
     happd reaps managed processes when the starting client disconnects, so
     this process sends the "start" frame and then holds the socket open,
     monitoring daemon events, until the tunnel goes away (user disconnect,
     daemon restart). Progress is reported via KEEPER_STATE; the menu action
-    polls that file for the outcome.
+    polls that file for the outcome. provider_id (the subscription the
+    menu picked the server from) disambiguates same-named servers across
+    subscriptions and is recorded in the state for connections().
     """
     logutil.log(f"keeper: starting ({server_name or 'last server'})")
     state: dict = {"status": "connecting", "pid": os.getpid()}
@@ -321,7 +323,9 @@ def run_keeper(server_name: str | None = None) -> None:
     # otherwise every later state of ours gets dropped (guarded by pid).
     _write_keeper_state(state)
     try:
-        cfg = happmeta.resolve_config(server_name or (_last_server_name() or ""))
+        cfg = happmeta.resolve_config(
+            server_name or (_last_server_name() or ""), provider_id=provider_id
+        )
         if cfg is None:
             state.update(status="error", message="no config for this server")
             _write_own_keeper_state(state)
@@ -374,7 +378,9 @@ def run_keeper(server_name: str | None = None) -> None:
                     _write_own_keeper_state(state)
                     return
 
-                state.update(status="connected", server=cfg.get("remarks"))
+                state.update(
+                    status="connected", server=cfg.get("remarks"), provider_id=provider_id
+                )
                 _write_own_keeper_state(state)
                 logutil.log(
                     f"keeper: connected ({state['server']})"
@@ -449,28 +455,31 @@ class HappProvider(VPNProvider):
                 )
             ]
 
-        # Which server is active? The keeper state knows best.
-        active_name = None
+        # Which server is active? The keeper state knows best — including
+        # which subscription it came from, for same-named servers.
+        active_name = active_sub = None
         if is_active:
             state = _read_keeper_state()
             if state and state.get("status") == "connected":
                 active_name = state.get("server")
+                active_sub = state.get("provider_id")
             if not active_name:
                 active_name = _last_server_name()
 
         # Exact match, or the unique substring match (GUI names can lack
         # the emoji prefix); ambiguous prefixes mark nothing.
-        matched = happmeta.match_server(active_name, servers) if active_name else None
+        matched = happmeta.match_server(active_name, servers, active_sub) if active_name else None
         conns = []
         for server in servers:
-            name = server["name"]
-            conn_active = matched is not None and name == matched["name"]
+            conn_active = server is matched  # identity, not name: names clash across subs
             conns.append(
                 VPNConnection(
-                    name=name,
+                    name=server["name"],
                     provider=self.name,
                     active=conn_active,
                     interface=interfaces[0] if conn_active and interfaces else None,
+                    subscription_id=server["provider_id"],
+                    subscription_name=server["provider_name"],
                 )
             )
         return conns
@@ -493,11 +502,12 @@ class HappProvider(VPNProvider):
         # Headless connect works even while the GUI is running: the GUI just
         # observes the same happd state. Configs come from the provider
         # subscription (merged like the GUI does) or from captures.
-        cfg = happmeta.resolve_config(connection.name)
+        sub_id = connection.subscription_id
+        cfg = happmeta.resolve_config(connection.name, provider_id=sub_id)
         headless_error = None
         if cfg is not None:
             self._stop_running()  # switch servers if something else is up
-            result = self._headless_connect(cfg.get("remarks") or connection.name)
+            result = self._headless_connect(cfg.get("remarks") or connection.name, sub_id)
             if result.success:
                 return result
             headless_error = result.message
@@ -544,15 +554,18 @@ class HappProvider(VPNProvider):
                 return
             time.sleep(0.3)
 
-    def _headless_connect(self, server_name: str) -> ActionResult:
+    def _headless_connect(self, server_name: str, provider_id: str | None = None) -> ActionResult:
         """Spawn the keeper process and wait for its verdict.
 
         The keeper allows 20 s for happd's start ack before it reports an
         error, so poll a while longer (25 s) before giving up ourselves."""
         KEEPER_STATE.unlink(missing_ok=True)
         manager = Path(__file__).resolve().parent.parent / "vpn_manager.py"
+        cmd = [sys.executable, str(manager), "--happ-keeper", server_name]
+        if provider_id:
+            cmd.append(provider_id)
         subprocess.Popen(
-            [sys.executable, str(manager), "--happ-keeper", server_name],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

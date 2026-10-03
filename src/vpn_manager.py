@@ -83,7 +83,7 @@ def get_status() -> dict:
     tooltip = []
     for conn in active:
         classes.append(f"vpn-{conn.provider.lower()}")
-        line = f"{conn.provider}: {conn.name}"
+        line = conn.label
         if conn.interface:
             # rate first (units per second, like the menu), then totals —
             # plain arrows on both rows confused "B/s" with "MiB"
@@ -105,7 +105,7 @@ def get_status() -> dict:
 
     first = active[0]
     return {
-        "text": f" {first.provider}: {first.name}{extra}",
+        "text": f" {first.label}{extra}",
         "tooltip": "\n".join(tooltip),
         "class": classes,
     }
@@ -142,7 +142,9 @@ def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
         ips: list[str] = []
         # cache-only: a menu click must never block on a subscription fetch
         # (the background --update-subs keeps the caches fresh)
-        params = happmeta.server_params(connection.name, allow_fetch=False)
+        params = happmeta.server_params(
+            connection.name, allow_fetch=False, provider_id=connection.subscription_id
+        )
         if params:
             ips = killswitch.resolve_endpoint_ips(
                 [(connection.name, params["host"], params["port"])]
@@ -606,7 +608,7 @@ def menu_loop() -> ActionResult:
     if all_active:
         if len(all_active) == 1:
             first = all_active[0]
-            items.append((f"Disconnect: {first.provider}: {first.name}", disconnect_all))
+            items.append((f"Disconnect: {first.label}", disconnect_all))
         else:
             items.append((f"Disconnect ALL  ({len(all_active)})", disconnect_all))
 
@@ -630,14 +632,14 @@ def _current_connection_items(conn: VPNConnection) -> list[tuple[str, callable]]
             metrics.append(exit_line.removeprefix("Exit: "))
         else:
             request_ip_update(conn.name)
-    rows = [(f"↻ {conn.provider}: {conn.name}", lambda: _reconnect(conn))]
+    rows = [(f"↻ {conn.label}", lambda: _reconnect(conn))]
     if metrics:
         rows.append((("     " + " · ".join(metrics)), lambda: _details(conn, cfg)))
     return rows
 
 
 def _details(conn: VPNConnection, cfg) -> ActionResult:
-    lines = [f"{conn.provider}: {conn.name}"]
+    lines = [conn.label]
     if conn.interface:
         live = iface_rate(conn.interface)
         totals = iface_traffic(conn.interface)
@@ -726,14 +728,20 @@ def happ_menu(provider) -> ActionResult:
     happmeta.request_ping_update()
     reputation.request_update()
     servers = happmeta.all_servers(allow_fetch=False)
-    active_names = {c.name for c in provider.connections() if c.active}
+    active_conns = [c for c in provider.connections() if c.active]
 
     # Exact match, or the unique substring match (GUI names can lack the
-    # emoji prefix); ambiguous prefixes mark nothing.
-    matched = {m["name"] for a in active_names if (m := happmeta.match_server(a, servers))}
+    # emoji prefix); ambiguous prefixes mark nothing. Matched by
+    # (subscription, name) — the same name in another subscription is a
+    # different server and must not light up too.
+    matched = {
+        (m["provider_id"], m["name"])
+        for c in active_conns
+        if (m := happmeta.match_server(c.name, servers, c.subscription_id))
+    }
     groups: dict[str, list] = {}
     for server in servers:
-        is_active = server["name"] in matched
+        is_active = (server["provider_id"], server["name"]) in matched
         groups.setdefault(server["provider_name"], []).append(
             {"name": server["name"], "active": is_active, "provider_id": server["provider_id"]}
         )
@@ -808,7 +816,13 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
             items.append(("ⓘ " + " · ".join(parts), _info_action))
 
     for entry in entries:
-        conn = VPNConnection(name=entry["name"], provider="Happ", active=entry["active"])
+        conn = VPNConnection(
+            name=entry["name"],
+            provider="Happ",
+            active=entry["active"],
+            subscription_id=entry.get("provider_id"),
+            subscription_name=pname,
+        )
         label = f"Disconnect {conn.name}" if conn.active else conn.name
         info = (happmeta.server_info_suffix(conn.name) + reputation.mark(conn.name)).strip()
         if info:
@@ -1015,9 +1029,8 @@ def main():
     )
     group.add_argument(
         "--happ-keeper",
-        nargs="?",
-        const="",
-        metavar="SERVER",
+        nargs="*",
+        metavar="SERVER [SUBSCRIPTION_ID]",
         help="Hold the happd session that owns the xray process (internal)",
     )
     group.add_argument(
@@ -1066,7 +1079,7 @@ def main():
     elif args.happ_keeper is not None:
         from providers.happ import run_keeper
 
-        run_keeper(args.happ_keeper or None)
+        run_keeper(*args.happ_keeper[:2])
     elif args.keys_keeper is not None:
         from providers.keys import run_keeper as run_keys_keeper
 

@@ -41,6 +41,18 @@ class VPNConnection:
     interface: str | None = None
     config_path: str | None = None
     uuid: str | None = None  # NetworkManager connection UUID
+    # Happ: which subscription this server came from. Server names are only
+    # unique within one subscription, so (subscription_id, name) is the
+    # real identity — two providers commonly both ship a "🇩🇪 Germany".
+    subscription_id: str | None = None
+    subscription_name: str | None = None
+
+    @property
+    def label(self) -> str:
+        """'Happ · Wirecat: 🇩🇪 Germany', or 'WireGuard: nl' without a subscription."""
+        if self.subscription_name:
+            return f"{self.provider} · {self.subscription_name}: {self.name}"
+        return f"{self.provider}: {self.name}"
 
 
 @dataclass

@@ -537,10 +537,19 @@ def all_servers(allow_fetch: bool = True) -> list[dict]:
     return servers
 
 
-def match_server(name: str, servers: list[dict]) -> dict | None:
+def match_server(name: str, servers: list[dict], provider_id: str | None = None) -> dict | None:
     """The server a name refers to: exact match, or the unique substring
     match (GUI names from Happ.conf can lack the emoji prefix). None when
-    ambiguous or missing — a prefix must never select the wrong server."""
+    ambiguous or missing — a prefix must never select the wrong server.
+
+    Names are only unique within one subscription, so a known provider_id
+    narrows the search to that subscription first; when it has no such
+    server (subscription removed or re-keyed since) the name alone decides,
+    as before."""
+    if provider_id:
+        own = [s for s in servers if s["provider_id"] == provider_id]
+        if own and (found := match_server(name, own)) is not None:
+            return found
     exact = [s for s in servers if name == s["name"]]
     if exact:
         return exact[0]
@@ -548,11 +557,13 @@ def match_server(name: str, servers: list[dict]) -> dict | None:
     return subs[0] if len(subs) == 1 else None
 
 
-def resolve_config(name: str, allow_fetch: bool = True) -> dict | None:
+def resolve_config(
+    name: str, allow_fetch: bool = True, provider_id: str | None = None
+) -> dict | None:
     """Runnable xray config for a server name: merged from the subscription
     when available, otherwise a captured config used as-is."""
     servers = all_servers(allow_fetch=allow_fetch)
-    server = match_server(name, servers)
+    server = match_server(name, servers, provider_id)
     if server is not None:
         if server["provider_id"]:
             return build_runtime_config(server["config"])
@@ -592,9 +603,11 @@ def _outbound_target(cfg: dict) -> tuple[str, int] | None:
         return None
 
 
-def server_params(name: str, allow_fetch: bool = True) -> dict | None:
+def server_params(
+    name: str, allow_fetch: bool = True, provider_id: str | None = None
+) -> dict | None:
     """{host, port, protocol, network, security} for a server."""
-    cfg = resolve_config(name, allow_fetch=allow_fetch)
+    cfg = resolve_config(name, allow_fetch=allow_fetch, provider_id=provider_id)
     if not cfg:
         return None
     outbound = _real_outbound(cfg)
