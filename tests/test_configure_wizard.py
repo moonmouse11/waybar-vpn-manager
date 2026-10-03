@@ -76,9 +76,9 @@ def test_terminal_prompter_text_returns_empty_on_eof_and_interrupt(monkeypatch):
 
 
 def test_walker_prompter_confirm_maps_selection(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": "Да")
+    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": "Yes")
     assert vpn_manager.WalkerPrompter().confirm("Q?", default=False) is True
-    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": "Нет")
+    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": "No")
     assert vpn_manager.WalkerPrompter().confirm("Q?", default=True) is False
     monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": None)
     assert vpn_manager.WalkerPrompter().confirm("Q?", default=True) is True  # escaped -> default
@@ -152,4 +152,4 @@ def test_settings_menu_reports_no_op_when_wizard_declined(monkeypatch):
     monkeypatch.setattr(vpn_manager, "run_configure_wizard", lambda prompter: False)
     result = vpn_manager.settings_menu()
     assert result.success is True
-    assert "без изменений" in result.message
+    assert "unchanged" in result.message

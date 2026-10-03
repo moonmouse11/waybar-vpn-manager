@@ -179,9 +179,27 @@ def test_server_params_trojan_fallback(tmp_path, monkeypatch):
     ping_file = tmp_path / "ping.json"
     monkeypatch.setattr(happmeta, "PING_CACHE", ping_file)
     ping_file.write_text(json.dumps({"tr": {"ms": 42.0, "at": time.time()}}))
-    suffix = happmeta.server_info_suffix("tr")
-    assert suffix.startswith("✓ ")
-    assert "/".join((params["protocol"], params["network"], params["security"])) in suffix
+    assert happmeta.protocol_label(trojan) == "trojan/ws/tls"
+    assert happmeta.server_info_suffix("tr", "trojan/ws/tls") == "✓ 42 ms · trojan/ws/tls"
+
+
+def test_protocol_label_variants():
+    assert happmeta.protocol_label(_HYSTERIA_BALANCER) == "hysteria/tls"  # no hysteria/hysteria
+    vless = {
+        "outbounds": [
+            {
+                "protocol": "vless",
+                "streamSettings": {"network": "tcp", "security": "reality"},
+            }
+        ]
+    }
+    assert happmeta.protocol_label(vless) == "vless/tcp/reality"  # the common case is shown too
+    assert happmeta.protocol_label({"outbounds": [{"protocol": "freedom"}]}) == ""
+
+
+def test_server_info_suffix_shows_protocol_without_ping(tmp_path, monkeypatch):
+    monkeypatch.setattr(happmeta, "PING_CACHE", tmp_path / "none.json")
+    assert happmeta.server_info_suffix("never-pinged", "hysteria/tls") == "hysteria/tls"
 
 
 def test_build_runtime_config_merges_like_gui():
@@ -204,7 +222,7 @@ def test_build_runtime_config_merges_like_gui():
     assert [i["protocol"] for i in cfg["inbounds"]] == ["socks", "http", "tun"]
     assert cfg["dns"]["tag"] == "dns-in"
     tags = [o["tag"] for o in cfg["outbounds"]]
-    assert "dns-out" in tags and len(tags) == 3
+    assert "dns-out" in tags and "dns-direct" in tags and len(tags) == 4
     rules = cfg["routing"]["rules"]
     assert rules[0]["process"] == ["self/", "xray"]
     assert rules[-1] == {"network": "tcp,udp", "outboundTag": "proxy"}
@@ -355,7 +373,7 @@ def test_all_servers_hides_captured_dupe_at_same_address(tmp_path, monkeypatch):
     servers = happmeta.all_servers()
     names = {s["name"] for s in servers}
     assert names == {"🇩🇪 Germany 4 - Gemini", "Some Other Live Server"}
-    misc = [s for s in servers if s["provider_name"] == "Прочие / без провайдера"]
+    misc = [s for s in servers if s["provider_name"] == "Other / no provider"]
     assert [s["name"] for s in misc] == ["Some Other Live Server"]
 
 
@@ -850,3 +868,82 @@ def test_resolve_config_uses_requested_provider(tmp_path, monkeypatch):
     monkeypatch.setattr(happmeta, "XRAY_CONFIGS", tmp_path / "none.json")
     cfg = happmeta.resolve_config("S", provider_id="2")
     assert any(o.get("x") == "b" for o in cfg["outbounds"])
+
+
+_HYSTERIA_BALANCER = {
+    "remarks": "DE+",
+    "outbounds": [
+        {
+            "protocol": "hysteria",
+            "tag": "DE-1",
+            "settings": {"address": "185.137.233.132", "port": 36106, "version": 2},
+            "streamSettings": {"network": "hysteria", "security": "tls"},
+        },
+        {
+            "protocol": "hysteria",
+            "tag": "DE-2",
+            "settings": {"address": "de2.example.com", "port": 443, "version": 2},
+            "streamSettings": {"network": "hysteria", "sockopt": {"tcpFastOpen": True}},
+        },
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"},
+    ],
+    "routing": {
+        "balancers": [{"tag": "auto", "selector": ["DE-1", "DE-2"]}],
+        "rules": [{"balancerTag": "auto", "network": "tcp,udp", "type": "field"}],
+    },
+}
+
+
+def test_outbound_target_understands_flat_settings_address():
+    # hysteria (and other newer outbounds) keep address/port at settings' top level
+    assert happmeta._outbound_target(_HYSTERIA_BALANCER) == ("185.137.233.132", 36106)
+
+
+def test_server_endpoints_lists_every_balancer_member():
+    assert happmeta.server_endpoints_of(_HYSTERIA_BALANCER) == [
+        ("185.137.233.132", 36106),
+        ("de2.example.com", 443),
+    ]
+
+
+def test_build_runtime_config_marks_only_proxy_outbounds_for_killswitch():
+    cfg = happmeta.build_runtime_config(_HYSTERIA_BALANCER)
+    by_tag = {o["tag"]: o for o in cfg["outbounds"]}
+    mark = happmeta.KILLSWITCH_MARK
+    assert by_tag["DE-1"]["streamSettings"]["sockopt"]["mark"] == mark
+    # an existing sockopt keeps its other keys
+    assert by_tag["DE-2"]["streamSettings"]["sockopt"] == {"tcpFastOpen": True, "mark": mark}
+    # split-tunnel "direct" stays unmarked: the killswitch blocks it by design
+    assert "mark" not in by_tag["direct"].get("streamSettings", {}).get("sockopt", {})
+    assert "streamSettings" not in by_tag["block"]
+    # xray's own resolver gets a marked freedom outbound so the killswitch
+    # can't break bootstrapping a domain-based server address
+    assert by_tag["dns-direct"]["protocol"] == "freedom"
+    assert by_tag["dns-direct"]["streamSettings"]["sockopt"]["mark"] == mark
+    dns_in_rule = next(r for r in cfg["routing"]["rules"] if r.get("inboundTag") == ["dns-in"])
+    assert dns_in_rule["outboundTag"] == "dns-direct"
+
+
+def test_build_runtime_config_chains_dns_out_through_existing_proxy_tag():
+    # balancer configs have no "proxy" tag — chaining through it would point
+    # at nothing; use the first real proxy outbound instead
+    cfg = happmeta.build_runtime_config(_HYSTERIA_BALANCER)
+    dns_out = next(o for o in cfg["outbounds"] if o["tag"] == "dns-out")
+    assert dns_out["proxySettings"] == {"tag": "DE-1", "transportLayer": True}
+
+
+def test_subscription_targets_from_provider_urls(tmp_path, monkeypatch):
+    _fake_providers(
+        monkeypatch,
+        tmp_path,
+        {
+            "1": {"name": "P1", "url": "https://sub.example.ru/u/TOKEN"},
+            "2": {"name": "P2", "url": "https://sub.example.com:8443/x"},
+            "3": {"name": "Captured", "url": None},
+        },
+    )
+    assert happmeta.subscription_targets() == [
+        ("P1", "sub.example.ru", 443),
+        ("P2", "sub.example.com", 8443),
+    ]

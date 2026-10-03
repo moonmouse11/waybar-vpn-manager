@@ -149,7 +149,7 @@ def parse_ss_key(url: str) -> dict:
         if params.get("plugin"):
             raise ValueError("plugin= keys are not supported (xray has no such plugin)")
         if params.get("prefix"):
-            raise ValueError("prefix-обфускация outline-sdk не поддерживается xray")
+            raise ValueError("outline-sdk prefix obfuscation is not supported by xray")
 
     userinfo_b64 = None
     hostpart = ""
@@ -239,7 +239,7 @@ def parse_vless_key(url: str) -> dict:
     if security not in ("none", "tls", "xtls", "reality"):
         raise ValueError(f"unsupported vless security {security!r}")
     if security == "reality" and not p("pbk"):
-        raise ValueError("vless reality требует pbk (public key)")
+        raise ValueError("vless reality requires pbk (public key)")
     network = (p("type") or "tcp").lower()
     if network not in ("tcp", "grpc", "ws"):
         raise ValueError(f"unsupported vless transport {network!r} (supported: tcp, grpc, ws)")
