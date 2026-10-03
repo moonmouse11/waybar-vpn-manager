@@ -16,6 +16,7 @@ verdict text).
 import concurrent.futures
 import contextlib
 import json
+import re
 import socket
 import urllib.request
 
@@ -23,6 +24,15 @@ API = "bash.ws"
 PROBE_COUNT = 30
 PROBE_TIMEOUT = 5  # seconds, bounds the whole probe wave regardless of stragglers
 REQUEST_TIMEOUT = 8  # seconds, per HTTP call
+
+# Public anycast resolvers — their egress can sit in any country near the
+# tunnel exit, so answering from one of these is never a leak on its own.
+NEUTRAL_ASNS = {
+    13335,  # Cloudflare (1.1.1.1)
+    15169,  # Google (8.8.8.8)
+    19281,  # Quad9 (9.9.9.9)
+    36692,  # Cisco OpenDNS
+}
 
 
 def _get_test_id() -> str:
@@ -48,9 +58,36 @@ def _fetch_results(test_id: str) -> list[dict]:
         return json.loads(resp.read().decode())
 
 
+def asn_number(asn: str | None) -> int | None:
+    """13335 for bash.ws's 'AS13335 CloudFlare Inc', None if unparseable."""
+    match = re.match(r"AS(\d+)", asn or "", re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def server_tags(server: dict, ip_country: str, ip_asn: int | None) -> list[str]:
+    """Own leak heuristic for one resolver, independent of bash.ws's verdict
+    (which knows nothing about which VPN is up). A resolver is trusted when
+    it's a public anycast service (NEUTRAL_ASNS) or shares the exit IP's
+    ASN (the VPN provider's own DNS). Otherwise: 'ASN' — not the VPN's and
+    not public; 'GEO' — sits in a different country than the exit IP. Each
+    rule stays quiet when the data it needs is missing, so a sparse bash.ws
+    reply never produces a false alarm."""
+    asn = asn_number(server.get("asn"))
+    if asn is not None and (asn in NEUTRAL_ASNS or asn == ip_asn):
+        return []
+    tags = []
+    if asn is not None and ip_asn is not None:
+        tags.append("ASN")
+    country = (server.get("country") or "").upper()
+    if country and ip_country and country != ip_country:
+        tags.append("GEO")
+    return tags
+
+
 def run() -> dict | None:
-    """{'ip', 'ip_country': 'DE'|'', 'dns_servers': [{'ip', 'country',
-    'country_name', 'asn', 'org'}], 'conclusion'} for a fresh test, or None
+    """{'ip', 'ip_country': 'DE'|'', 'ip_asn': 24940|None, 'dns_servers':
+    [{'ip', 'country', 'country_name', 'asn', 'org'}], 'conclusion'} for a
+    fresh test, or None
     on any network failure. ip_country is the 2-letter code bash.ws reports
     for the detected public IP itself (present in its "ip"-type entry, same
     shape as the "dns" entries) — kept separate from the bare ip string so
@@ -72,6 +109,7 @@ def run() -> dict | None:
     return {
         "ip": ip_entry.get("ip") if ip_entry else None,
         "ip_country": ((ip_entry or {}).get("country") or "").upper(),
+        "ip_asn": asn_number((ip_entry or {}).get("asn")),
         "dns_servers": dns_servers,
         "conclusion": conclusion or "",
     }

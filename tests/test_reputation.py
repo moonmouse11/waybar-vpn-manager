@@ -336,3 +336,23 @@ def test_write_reputations_paces_between_lookups(tmp_path, monkeypatch):
     monkeypatch.setattr(reputation.time, "sleep", lambda s: slept.append(s))
     reputation.write_reputations([("a", "host-a", 443), ("b", "host-b", 443)])
     assert slept == [42, 42]  # once per unique host looked up
+
+
+def test_country_of_reads_cached_server_country(tmp_path, monkeypatch):
+    p = tmp_path / "reputation.json"
+    monkeypatch.setattr(reputation, "CACHE", p)
+    assert reputation.country_of("de1") is None  # no cache yet
+    p.write_text(
+        json.dumps(
+            {
+                # stale is fine — a server's country doesn't move like its tags might
+                "de1": {"at": time.time() - reputation.MAX_AGE - 1, "country_code": "de"},
+                "nocc": {"at": time.time(), "country_code": None},
+                "updated_at": time.time(),
+            }
+        )
+    )
+    assert reputation.country_of("de1") == "DE"
+    assert reputation.country_of("nocc") is None
+    assert reputation.country_of("updated_at") is None
+    assert reputation.country_of("missing") is None
