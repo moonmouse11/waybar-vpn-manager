@@ -28,6 +28,7 @@ docs/happd-protocol.md and scripts/happd-extract-config.py. Disconnect and
 status always work headless via happd.
 """
 
+import contextlib
 import json
 import os
 import socket
@@ -39,6 +40,7 @@ import time
 from pathlib import Path
 
 import config
+import fsutil
 import happmeta
 import logutil
 
@@ -154,14 +156,8 @@ def _daemon_running_processes(fresh: bool = False) -> list[str]:
         if p.get("running") and p.get("process-id")
     ]
     if not fresh:
-        try:
-            PROCS_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = PROCS_CACHE.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"at": time.time(), "procs": procs}))
-            os.chmod(tmp, 0o600)
-            tmp.replace(PROCS_CACHE)
-        except OSError:
-            pass
+        with contextlib.suppress(OSError):
+            fsutil.write_json_atomic(PROCS_CACHE, {"at": time.time(), "procs": procs})
     return procs
 
 
@@ -232,13 +228,8 @@ KEEPER_STATE = Path.home() / ".local/state/vpn-manager/happ-keeper.json"
 
 
 def _write_keeper_state(state: dict) -> None:
-    try:
-        KEEPER_STATE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = KEEPER_STATE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state))
-        tmp.replace(KEEPER_STATE)
-    except OSError:
-        pass
+    with contextlib.suppress(OSError):
+        fsutil.write_json_atomic(KEEPER_STATE, state)
 
 
 def _read_keeper_state() -> dict | None:

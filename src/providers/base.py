@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+import fsutil
+
 
 def read_config_text(path) -> str | None:
     """Text of a provider config: direct read first, else 'sudo -n cat'.
@@ -119,10 +121,7 @@ def sample_iface_traffic(iface: str) -> None:
         if not isinstance(cache, dict):
             cache = {}
         cache[iface] = {"rx": rx, "tx": tx, "at": time.time()}
-        RATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = RATE_CACHE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cache))
-        tmp.replace(RATE_CACHE)
+        fsutil.write_json_atomic(RATE_CACHE, cache)
     except OSError:
         pass
 

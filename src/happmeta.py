@@ -16,7 +16,6 @@ import contextlib
 import copy
 import hashlib
 import json
-import os
 import re
 import socket
 import statistics
@@ -27,6 +26,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+import fsutil
 
 LOG_FILE = Path.home() / ".local/share/Happ/logs/subscription_log.txt"
 ROUTING_FILE = Path.home() / ".config/Happ/routing.json"
@@ -207,16 +208,12 @@ def providers() -> dict[str, dict]:
     except (OSError, json.JSONDecodeError):
         pass
     result = _parse_providers()
-    try:
-        PROVIDERS_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        PROVIDERS_CACHE.write_text(
-            json.dumps(
-                {"version": PROVIDERS_CACHE_VERSION, "mtime": mtime, "providers": result}
-            )
+    # subscription URLs carry access tokens — fsutil writes 0600
+    with contextlib.suppress(OSError):
+        fsutil.write_json_atomic(
+            PROVIDERS_CACHE,
+            {"version": PROVIDERS_CACHE_VERSION, "mtime": mtime, "providers": result},
         )
-        os.chmod(PROVIDERS_CACHE, 0o600)  # subscription URLs carry access tokens
-    except OSError:
-        pass
     return result
 
 
@@ -294,14 +291,9 @@ def fetch_subscription(sub_id: str, url: str, force: bool = False) -> list[dict]
                 ):
                     # panel answered without headers — keep the previous info
                     record["info"] = cached["info"]
-                try:
-                    SUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                    cache_path.write_text(
-                        json.dumps(record, ensure_ascii=False)
-                    )
-                    os.chmod(cache_path, 0o600)  # configs carry UUIDs and reality keys
-                except OSError:
-                    pass
+                # configs carry UUIDs and reality keys — fsutil writes 0600
+                with contextlib.suppress(OSError):
+                    fsutil.write_json_atomic(cache_path, record, ensure_ascii=False)
                 return servers
         except (OSError, ValueError):
             pass
@@ -418,11 +410,8 @@ def _subs_refresh_in_progress() -> bool:
 
 
 def _stamp_subs_refresh() -> None:
-    try:
-        SUB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _subs_refresh_path().write_text(json.dumps({"at": time.time()}))
-    except OSError:
-        pass
+    with contextlib.suppress(OSError):
+        fsutil.write_json_atomic(_subs_refresh_path(), {"at": time.time()})
 
 
 def request_subscription_update() -> None:
@@ -794,11 +783,8 @@ def write_pings(targets: list[tuple[str, str, int]]) -> None:
             ms = None  # one bad target must not abort the whole sweep
         pings[name] = {"ms": ms, "at": time.time()}
     pings["updated_at"] = time.time()
-    try:
-        PING_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        PING_CACHE.write_text(json.dumps(pings, ensure_ascii=False))
-    except OSError:
-        pass
+    with contextlib.suppress(OSError):
+        fsutil.write_json_atomic(PING_CACHE, pings, ensure_ascii=False)
 
 
 def _fresh_ping_entry(name: str) -> dict | None:

@@ -7,12 +7,14 @@ background `vpn_manager.py --update-ip <connection>` run.
 Cache: ~/.cache/vpn-manager/exit_ip.json
 """
 
+import contextlib
 import json
 import threading
 import time
 import urllib.request
 from pathlib import Path
 
+import fsutil
 import logutil
 
 CACHE_PATH = Path.home() / ".cache" / "vpn-manager" / "exit_ip.json"
@@ -87,13 +89,8 @@ def update(connection: str) -> None:
         if "error" in entry:
             logutil.log(f"exit-ip fetch failed: {entry['error']}")
 
-    try:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CACHE_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(entry))
-        tmp.replace(CACHE_PATH)
-    except OSError:
-        pass
+    with contextlib.suppress(OSError):
+        fsutil.write_json_atomic(CACHE_PATH, entry)
 
 
 def _fetch() -> dict:
