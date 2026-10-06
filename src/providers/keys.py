@@ -18,6 +18,7 @@ share-link query params (reality/tls, grpc/ws/tcp).
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
+import fsutil
 import happmeta
 import logutil
 
@@ -289,11 +291,7 @@ def _load_servers() -> list[dict]:
 
 
 def _save_servers(servers: list[dict]) -> None:
-    STORE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STORE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(servers, ensure_ascii=False, indent=1))
-    os.chmod(tmp, 0o600)
-    tmp.replace(STORE)
+    fsutil.write_json_atomic(STORE, servers, ensure_ascii=False, indent=1)
 
 
 def _server_id(server: dict) -> str:
@@ -425,13 +423,8 @@ def _write_keeper_state(state_path: Path, state: dict, own: bool = False) -> Non
         current = _read_keeper_state(state_path)
         if current is not None and current.get("pid", state["pid"]) != state["pid"]:
             return  # a newer keeper owns the file
-    try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state))
-        tmp.replace(state_path)
-    except OSError:
-        pass
+    with contextlib.suppress(OSError):
+        fsutil.write_json_atomic(state_path, state)
 
 
 def _read_keeper_state(state_path: Path) -> dict | None:

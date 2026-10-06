@@ -19,7 +19,9 @@ def log(message: str) -> None:
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         if LOG_PATH.exists() and LOG_PATH.stat().st_size > MAX_BYTES:
-            LOG_PATH.write_text(LOG_PATH.read_text(errors="replace")[-MAX_BYTES // 2 :])
+            tail = LOG_PATH.read_text(errors="replace")[-MAX_BYTES // 2 :]
+            with LOG_PATH.open("w") as f:
+                f.write(tail)
         with LOG_PATH.open("a") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
     except OSError:

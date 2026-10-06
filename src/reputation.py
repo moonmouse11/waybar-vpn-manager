@@ -16,6 +16,7 @@ sources are for the on-demand lookup_self() ("IP Info" menu action) only,
 so a paid source's monthly quota is never at risk from routine menu use.
 """
 
+import contextlib
 import json
 import socket
 import subprocess
@@ -25,6 +26,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+import fsutil
 import ipsources
 from ipsources.base import IPFinding, fetch_json
 
@@ -213,8 +215,5 @@ def write_reputations(targets: list[tuple[str, str, int]]) -> None:
             "country_code": findings[0].country_code,
         }
     entries["updated_at"] = time.time()
-    try:
-        CACHE.parent.mkdir(parents=True, exist_ok=True)
-        CACHE.write_text(json.dumps(entries, ensure_ascii=False))
-    except OSError:
-        pass
+    with contextlib.suppress(OSError):
+        fsutil.write_json_atomic(CACHE, entries, ensure_ascii=False)

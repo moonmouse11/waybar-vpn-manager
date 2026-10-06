@@ -18,6 +18,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import fsutil
+
 CONFIG_PATH = Path.home() / ".config" / "vpn-manager" / "config.json"
 
 
@@ -90,8 +92,4 @@ def save_config(cfg: Config) -> None:
         "ip_sources": cfg.ip_sources,
         "tools_visible": cfg.tools_visible,
     }
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CONFIG_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(raw, indent=2) + "\n")
-    tmp.chmod(0o600)
-    tmp.replace(CONFIG_PATH)
+    fsutil.write_json_atomic(CONFIG_PATH, raw, indent=2)
