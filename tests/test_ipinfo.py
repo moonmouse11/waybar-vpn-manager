@@ -30,7 +30,8 @@ def test_status_line(tmp_path, monkeypatch):
     assert ipinfo.status_line("b", 600) is None
 
 
-def test_status_line_flags_suspicious_exit(tmp_path, monkeypatch):
+def test_status_line_has_no_reputation_marker(tmp_path, monkeypatch):
+    # a Russian-registered exit is not a leak — no marker on the Exit line
     p = tmp_path / "cache.json"
     monkeypatch.setattr(ipinfo, "CACHE_PATH", p)
     entry = {
@@ -41,7 +42,7 @@ def test_status_line_flags_suspicious_exit(tmp_path, monkeypatch):
         "domain": "dhost.su",
     }
     p.write_text(json.dumps(entry))
-    assert ipinfo.status_line("a", 600) == "Exit: 1.2.3.4 🇩🇪 ⚠RU"
+    assert ipinfo.status_line("a", 600) == "Exit: 1.2.3.4 🇩🇪"
 
 
 def test_update_caches_and_throttles(tmp_path, monkeypatch):

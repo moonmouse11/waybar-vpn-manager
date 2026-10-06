@@ -142,12 +142,16 @@ def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
         ips: list[str] = []
         # cache-only: a menu click must never block on a subscription fetch
         # (the background --update-subs keeps the caches fresh)
-        params = happmeta.server_params(
+        # every balancer member, not just the first: xray may dial any of them
+        endpoints = happmeta.server_endpoints(
             connection.name, allow_fetch=False, provider_id=connection.subscription_id
         )
-        if params:
+        if endpoints:
+            # + subscription hosts: refreshing them goes through xray and is
+            # often routed `direct` (Russian-hosted), which the killswitch blocks
             ips = killswitch.resolve_endpoint_ips(
-                [(connection.name, params["host"], params["port"])]
+                [(connection.name, host, port) for host, port in endpoints]
+                + happmeta.subscription_targets()
             )
         ks_result = killswitch.resume_for_happ(extra_ips=ips)
     elif killswitch.mode() == "all" and provider.name in (
@@ -292,6 +296,7 @@ def _killswitch_all_targets() -> tuple[list[str], list[str]]:
                 ifaces.append("tun*")  # OpenVPN tunnel interfaces
         elif provider.name in ("VLESS", "Shadowsocks") and pt:
             ifaces.append(provider.tunnel_iface)
+    targets += happmeta.subscription_targets()  # refreshes must survive the killswitch
     return killswitch.resolve_endpoint_ips(targets), sorted(set(ifaces))
 
 
@@ -308,32 +313,22 @@ def _killswitch_item() -> tuple[str, callable]:
     return ("  Killswitch: OFF — click to enable (all)", lambda: _killswitch_toggle(True))
 
 
-def _dns_leak_verdict_icon(conclusion: str) -> str:
-    c = conclusion.lower()
-    if "may be leaking" in c or "leak detected" in c:
-        return "⚠️ "
-    if "not leaking" in c or "no leak" in c:
-        return "✅ "
-    return ""
-
-
 def _dns_leak_server_row(
     server: dict, ip_country: str = "", ip_asn: int | None = None
 ) -> tuple[str, callable]:
     """One row per detected resolver — the wider walker window (see
     WALKER_WIDTH) is the actual fix for these getting truncated; no need to
-    collapse the list to make it fit. Tags: RU from the shared reputation
-    heuristic, ASN/GEO from dnsleak.server_tags() against the exit IP."""
+    collapse the list to make it fit. 'Leaked' when dnsleak.server_tags()
+    finds the resolver is neither the VPN's nor a public one (ASN) or sits in
+    another country than the exit IP (GEO) — wherever that country is."""
     country = (server.get("country") or "").upper()
     flag = ipinfo.flag_emoji(country)
     org = server.get("org") or server.get("asn") or ""
     label = f"{flag} {server.get('ip') or '?'}".strip()
     if org:
         label += f" · {org}"
-    tags = reputation._reason_tags({"country_code": country})
-    tags += dnsleak.server_tags(server, ip_country, ip_asn)
-    if tags:
-        label += f"  ⚠{'/'.join(tags)}"
+    if dnsleak.server_tags(server, ip_country, ip_asn):
+        label += "  Leaked"
     return (label, lambda: ActionResult(True, ""))
 
 
@@ -343,36 +338,36 @@ def _dns_leak_exit_row(ip_country: str, active: list[VPNConnection]) -> str:
     The exit IP legitimately differs from the endpoint (Happ bridges,
     CDN-fronted xray), but a different country is a real red flag."""
     if not active:
-        return "⚠ No VPN active — this is your real IP"
+        return "No VPN active — this is your real IP"
     known = [(c.name, reputation.country_of(c.name)) for c in active]
     known = [(name, cc) for name, cc in known if cc]
     if not known:
         return f"VPN: {active[0].name}"
     for name, cc in known:
         if cc == ip_country:
-            return f"✅ Exit matches {name} {ipinfo.flag_emoji(cc)}"
+            return f"Exit matches {name} {ipinfo.flag_emoji(cc)}"
     name, cc = known[0]
-    return f"⚠ Exit ≠ {name} {ipinfo.flag_emoji(cc)}"
+    return f"Leaked: exit ≠ {name} {ipinfo.flag_emoji(cc)}"
 
 
 def _dns_leak_ipv6_row(vpn_active: bool) -> str:
     if ipv6guard.is_disabled():
-        return "✅ IPv6: disabled"
-    return "⚠ IPv6: enabled — bypasses the tunnel" if vpn_active else "IPv6: enabled"
+        return "IPv6: disabled"
+    return "Leaked: IPv6 enabled — bypasses the tunnel" if vpn_active else "IPv6: enabled"
 
 
 def _dns_leak_verdict_row(result: dict) -> str | None:
     """Own verdict over every resolver, shown next to bash.ws's. None when
     the exit IP's country and ASN are both unknown — server_tags() would
-    then flag nobody, and a ✅ built on no data would be a lie."""
+    then flag nobody, and an all-clear built on no data would be a lie."""
     servers = result["dns_servers"]
     ip_country, ip_asn = result["ip_country"], result.get("ip_asn")
     if not servers or not (ip_country or ip_asn):
         return None
     flagged = sum(1 for s in servers if dnsleak.server_tags(s, ip_country, ip_asn))
     if flagged:
-        return f"⚠ {flagged}/{len(servers)} DNS outside VPN/public resolvers"
-    return "✅ DNS via VPN or public resolvers"
+        return f"Leaked: {flagged}/{len(servers)} DNS outside VPN/public resolvers"
+    return "DNS via VPN or public resolvers"
 
 
 def dns_leak_test_menu() -> ActionResult:
@@ -380,10 +375,10 @@ def dns_leak_test_menu() -> ActionResult:
     synchronously (a few seconds of DNS probes) and shows the result as a
     submenu rather than a single notification, so a long DNS-server list
     stays readable instead of getting truncated in a notify-send bubble."""
-    notify("DNS Leak Test", "Проверка запущена, это займёт несколько секунд…")
+    notify("DNS Leak Test", "Test started, this takes a few seconds…")
     result = dnsleak.run()
     if result is None:
-        return ActionResult(False, "Не удалось выполнить проверку — нет сети?")
+        return ActionResult(False, "Test failed — no network?")
 
     active = active_connections()
     ip_country, ip_asn = result["ip_country"], result.get("ip_asn")
@@ -401,8 +396,7 @@ def dns_leak_test_menu() -> ActionResult:
     if verdict:
         items.append((verdict, lambda: ActionResult(True, "")))
     if result["conclusion"]:
-        icon = _dns_leak_verdict_icon(result["conclusion"])
-        items.append((f"{icon}{result['conclusion']}", lambda: ActionResult(True, "")))
+        items.append((f"bash.ws: {result['conclusion']}", lambda: ActionResult(True, "")))
     items.append((BACK_LABEL, tools_menu))
     run_items(_unique_labels(items), prompt="DNS Leak Test")
     return ActionResult(True, "")
@@ -418,10 +412,10 @@ def ip_info_menu() -> ActionResult:
     source (free ones on by default; keyed ones once their API key is
     set). A single ad-hoc lookup for the current public IP, not the
     background reputation sweep."""
-    notify("IP Info", "Проверка запущена, это займёт несколько секунд…")
+    notify("IP Info", "Test started, this takes a few seconds…")
     findings = reputation.lookup_self(include_keyed=True)
     if not findings:
-        return ActionResult(False, "Не удалось получить информацию об IP — нет сети?")
+        return ActionResult(False, "Could not get IP info — no network?")
 
     items: list[tuple[str, callable]] = [(f"IP: {findings[0].ip}", lambda: ActionResult(True, ""))]
     for finding in findings:
@@ -440,10 +434,10 @@ def ip_info_menu() -> ActionResult:
 
 def speed_test_menu() -> ActionResult:
     """Single-measurement download throughput through the current tunnel."""
-    notify("Speed Test", "Тест запущен, это займёт несколько секунд…")
+    notify("Speed Test", "Test started, this takes a few seconds…")
     mbps = speedtest.measure()
     if mbps is None:
-        return ActionResult(False, "Не удалось выполнить тест — нет сети?")
+        return ActionResult(False, "Test failed — no network?")
     return ActionResult(True, f"⬇ {mbps:.1f} MB/s")
 
 
@@ -467,7 +461,7 @@ def refresh_all_menu() -> ActionResult:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    return ActionResult(True, "Обновление запущено в фоне")
+    return ActionResult(True, "Refresh started in the background")
 
 
 CACHE_DIR = Path.home() / ".cache/vpn-manager"
@@ -475,18 +469,24 @@ CACHE_DIR = Path.home() / ".cache/vpn-manager"
 
 def clear_caches_menu() -> ActionResult:
     """Every cache this project writes lives under CACHE_DIR (happmeta's
-    PING_CACHE/PROVIDERS_CACHE/subscription-*.json, reputation.CACHE,
-    ipinfo.CACHE_PATH, providers/base.py's RATE_CACHE) — safe to delete on
-    demand, every reader already tolerates a missing file.
+    PING_CACHE/PROVIDERS_CACHE, reputation.CACHE, ipinfo.CACHE_PATH,
+    providers/base.py's RATE_CACHE) — safe to delete on demand, every reader
+    already tolerates a missing file. subscription-*.json is kept: it is
+    server data, refreshed in place by the subscription sweep.
     ~/.config/happ-capture/ is NOT touched — that's captured server data,
     not a cache."""
     removed = 0
     if CACHE_DIR.is_dir():
         for f in CACHE_DIR.glob("*.json"):
+            if f.name.startswith("subscription-"):
+                # the only offline copy of a subscription's servers: deleting
+                # it empties the Happ menu until a refetch succeeds, which a
+                # killswitch or a dead network can block indefinitely
+                continue
             with contextlib.suppress(OSError):
                 f.unlink()
                 removed += 1
-    return ActionResult(True, f"Кэш очищен ({removed} файлов) — пересоберётся сам")
+    return ActionResult(True, f"Cache cleared ({removed} files) — rebuilt automatically")
 
 
 class Prompter(ABC):
@@ -504,7 +504,7 @@ class TerminalPrompter(Prompter):
             answer = input(f"{question} {suffix} ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return default
-        return default if not answer else answer in ("y", "yes", "д", "да")
+        return default if not answer else answer in ("y", "yes")
 
     def text(self, question: str) -> str:
         try:
@@ -515,8 +515,8 @@ class TerminalPrompter(Prompter):
 
 class WalkerPrompter(Prompter):
     def confirm(self, question: str, default: bool) -> bool:
-        selected = walker_select(["Да", "Нет"], prompt=question)
-        return (selected == "Да") if selected else default
+        selected = walker_select(["Yes", "No"], prompt=question)
+        return (selected == "Yes") if selected else default
 
     def text(self, question: str) -> str:
         return walker_input(question) or ""
@@ -529,7 +529,7 @@ def run_configure_wizard(prompter: Prompter) -> bool:
     user opts in via the first confirm. Returns False when the user
     declines reconfigure on an existing file; True after save."""
     if config.CONFIG_PATH.exists():
-        if not prompter.confirm("Конфиг уже существует. Перенастроить?", False):
+        if not prompter.confirm("Config already exists. Reconfigure?", False):
             return False
         cfg = config.load_config()
     else:
@@ -537,23 +537,23 @@ def run_configure_wizard(prompter: Prompter) -> bool:
 
     for provider in ALL_PROVIDERS:
         visible = prompter.confirm(
-            f"Показывать {provider.name}?", cfg.provider_visible(provider.name)
+            f"Show {provider.name}?", cfg.provider_visible(provider.name)
         )
         cfg.providers[provider.name.lower()] = visible
 
     for key, label, _fn in [*TOOLS, ("killswitch", "Killswitch", None)]:
-        visible = prompter.confirm(f"Показывать инструмент «{label}»?", cfg.tool_visible(key))
+        visible = prompter.confirm(f"Show tool “{label}”?", cfg.tool_visible(key))
         cfg.tools_visible[key] = visible
 
     for source in ipsources.ALL_SOURCES:
         if source.needs_api_key:
             answer = prompter.text(
-                f"API-ключ {source.name} (Enter — оставить как есть/пропустить)"
+                f"{source.name} API key (Enter — keep current / skip)"
             )
             if answer:
                 cfg.ip_sources.setdefault(source.key, {})["api_key"] = answer
         else:
-            enabled = prompter.confirm(f"Использовать {source.name}?", source.is_enabled())
+            enabled = prompter.confirm(f"Use {source.name}?", source.is_enabled())
             cfg.ip_sources.setdefault(source.key, {})["enabled"] = enabled
 
     config.save_config(cfg)
@@ -562,9 +562,9 @@ def run_configure_wizard(prompter: Prompter) -> bool:
 
 def settings_menu() -> ActionResult:
     if run_configure_wizard(WalkerPrompter()):
-        return ActionResult(True, "Настройки сохранены")
+        return ActionResult(True, "Settings saved")
     # Declined reconfigure — not a failure; run_items() maps success=False to urgent errors.
-    return ActionResult(True, "Настройки без изменений")
+    return ActionResult(True, "Settings unchanged")
 
 
 # single source of truth for both tools_menu()'s rows and the configure
@@ -749,7 +749,7 @@ def provider_menu(provider) -> ActionResult:
     reputation.request_update()
     items: list[tuple[str, callable]] = []
     for conn in provider.connections():
-        info = (happmeta.ping_mark(conn.name) + reputation.mark(conn.name)).strip()
+        info = happmeta.ping_mark(conn.name)
         suffix = f"    {info}" if info else ""
         if conn.active:
             items.append(
@@ -794,7 +794,12 @@ def happ_menu(provider) -> ActionResult:
     for server in servers:
         is_active = (server["provider_id"], server["name"]) in matched
         groups.setdefault(server["provider_name"], []).append(
-            {"name": server["name"], "active": is_active, "provider_id": server["provider_id"]}
+            {
+                "name": server["name"],
+                "active": is_active,
+                "provider_id": server["provider_id"],
+                "protocol": happmeta.protocol_label(server["config"]),
+            }
         )
 
     items: list[tuple[str, callable]] = []
@@ -831,7 +836,7 @@ def _refresh_subscriptions() -> ActionResult:
 def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
     """Happ level 3: servers of one provider with ping + protocol info."""
     if not entries:
-        notify("Happ", f"{pname}: нет серверов")
+        notify("Happ", f"{pname}: no servers")
         return ActionResult(True, "")
     items: list[tuple[str, callable]] = []
 
@@ -844,10 +849,10 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
         traffic = happmeta.fmt_traffic(info.get("download"))
         limit = happmeta.fmt_limit(info.get("total"))
         if traffic != "?" or limit != "∞":
-            parts.append(f"Трафик {traffic} / {limit}")
+            parts.append(f"Traffic {traffic} / {limit}")
         expire = happmeta.fmt_expire(info.get("expire"))
         if expire != "?":
-            parts.append(f"до {expire}")
+            parts.append(f"until {expire}")
         if parts:
             lines = []
             if info.get("title"):
@@ -858,7 +863,7 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
                 f"{happmeta.fmt_limit(info.get('total'))}"
             )
             if expire != "?":
-                lines.append(f"Действует до {expire}")
+                lines.append(f"Valid until {expire}")
 
             def _info_action():
                 notify(f"Happ · {pname}", "\n".join(lines))
@@ -875,7 +880,7 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
             subscription_name=pname,
         )
         label = f"Disconnect {conn.name}" if conn.active else conn.name
-        info = (happmeta.server_info_suffix(conn.name) + reputation.mark(conn.name)).strip()
+        info = happmeta.server_info_suffix(conn.name, entry.get("protocol", ""))
         if info:
             label += f"    {info}"
         if conn.active:
@@ -981,7 +986,7 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
         subprocess.run(["pkill", "-f", "walker -d"], capture_output=True)
         notify(
             "VPN — Error",
-            "walker завис — сервис перезапущен, откройте меню ещё раз",
+            "walker hung — service restarted, open the menu again",
             urgent=True,
         )
         return None

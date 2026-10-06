@@ -1,29 +1,34 @@
 #!/usr/bin/env bash
-# happ-killswitch — killswitch для VPN-подключений (Happ, WireGuard, OpenVPN).
+# happ-killswitch — killswitch for VPN connections (Happ, WireGuard, OpenVPN).
 #
-# Режет ВЕСЬ исходящий трафик, кроме:
-#   - VPN-туннелей (happ-*, плюс интерфейсы, переданные через --iface)
-#   - DNS (udp/tcp dport 53 — без него не резолвятся хостнеймы эндпоинтов)
-#   - локальных сетей (LAN, роутер, DHCP)
-#   - IP VPN-серверов из конфига + IP, переданные аргументами (сервер Happ
-#     из ~/.config/happ-killswitch.conf + резолвленные эндпоинты WG/OpenVPN)
+# Blocks ALL outbound traffic except:
+#   - packets carrying xray's SO_MARK (Happ/Keys proxy outbounds, see
+#     happmeta.KILLSWITCH_MARK) — the tunnel itself, whatever its servers
+#   - VPN tunnels (happ-*, plus interfaces passed via --iface)
+#   - DNS (udp/tcp dport 53 — without it endpoint hostnames don't resolve)
+#   - local networks (LAN, router, DHCP)
+#   - VPN server IPs from the config + IPs passed as arguments (the Happ
+#     server from ~/.config/happ-killswitch.conf + resolved WG/OpenVPN endpoints)
 #
-# Итог: туннель жив = есть интернет; туннель умер = интернета нет вообще.
+# Net effect: tunnel up = internet works; tunnel down = no internet at all.
 #
-# Использование:
-#   happ-killswitch detect                 # IP сервера Happ (Happ должен быть подключён)
-#   happ-killswitch on [IP…] [--iface ИМЯ] # включить (аргументы — доп. IP серверов
-#                                          # WG/OpenVPN, --iface — разрешённые tun-интерфейсы)
-#   happ-killswitch off                    # выключить (полный откат)
-#   happ-killswitch status                 # показать текущие правила
+# Usage:
+#   happ-killswitch detect                  # Happ server IPs (Happ must be connected)
+#   happ-killswitch on [IP…] [--iface NAME] [--no-conf]
+#                                           # enable (args: extra server IPs, --iface: allowed
+#                                           # tunnel interfaces, --no-conf: ignore saved IPs)
+#   happ-killswitch off                     # disable (full rollback)
+#   happ-killswitch status                  # show the current rules
 #
-# Требует root для on/off (sudo). Устанавливается в /usr/local/bin
-# с root-владением — см. install.sh проекта waybar-vpn-manager.
+# Needs root for on/off (sudo). Installed to /usr/local/bin, root-owned —
+# see waybar-vpn-manager's install.sh.
 set -euo pipefail
 
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/happ-killswitch.conf"
+# must equal happmeta.KILLSWITCH_MARK (checked by tests/test_killswitch.py)
+XRAY_MARK=0x6b73
 
-# Внутри используем sudo только если не root (sudoers даёт NOPASSWD этому скрипту)
+# Use sudo internally only when not root (sudoers grants this script NOPASSWD)
 SUDO=""
 if [[ $EUID -ne 0 ]]; then
     SUDO="sudo"
@@ -32,46 +37,50 @@ fi
 die() { echo "error: $*" >&2; exit 1; }
 
 load_ips() {
-    [[ -f $CONF ]] || die "конфиг $CONF не найден — сначала: happ-killswitch detect"
+    [[ -f $CONF ]] || die "config $CONF not found — run first: happ-killswitch detect"
     # shellcheck disable=SC1090
     . "$CONF"
-    [[ -n ${SERVER_IPS:-} ]] || die "SERVER_IPS пуст в $CONF — сначала: happ-killswitch detect"
+    [[ -n ${SERVER_IPS:-} ]] || die "SERVER_IPS is empty in $CONF — run first: happ-killswitch detect"
 }
 
 detect() {
-    # xray (Happ) ходит на VPN-сервер напрямую через физический интерфейс —
-    # эти соединения и ищем. Приватные/служебные адреса отбрасываем.
+    # xray (Happ) talks to the VPN server directly over the physical
+    # interface — those are the connections we look for. Private/special
+    # addresses are dropped.
     local ips
     ips=$(ss -tn state established \
         | awk '$3 ~ /%(wlan|eth|enp|wlp)/ { split($4, a, ":"); print a[1] }' \
         | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|127\.|224\.|255\.|::1|fe80)' \
         | sort -u || true)
-    [[ -n $ips ]] || die "не нашёл активных соединений Happ — подключи VPN и повтори"
+    [[ -n $ips ]] || die "no active Happ connections found — connect the VPN and retry"
     {
-        echo "# IP VPN-серверов Happ (обновляется командой 'happ-killswitch detect')"
+        echo "# Happ VPN server IPs (updated by 'happ-killswitch detect')"
         echo "SERVER_IPS=\"$ips\""
     } > "$CONF"
-    echo "сохранено в $CONF:"
+    echo "saved to $CONF:"
     echo "$ips" | sed 's/^/  /'
     echo
-    echo "ВНИМАНИЕ: если переключишь сервер в Happ — запусти detect заново."
+    echo "NOTE: if you switch servers in Happ, run detect again."
 }
 
 on() {
-    # Аргументы: дополнительные IP серверов (позиционные) + --iface ИМЯ
-    # (разрешённые выходные интерфейсы туннелей, например --iface wg0 --iface 'tun*').
-    local extra_ips=() ifaces=()
+    # Arguments: extra server IPs (positional) + --iface NAME
+    # (allowed tunnel egress interfaces, e.g. --iface wg0 --iface 'tun*').
+    local extra_ips=() ifaces=() use_conf=1
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --iface) [[ $# -ge 2 ]] || die "--iface требует имя интерфейса"
+            --iface) [[ $# -ge 2 ]] || die "--iface needs an interface name"
                      ifaces+=("$2"); shift 2 ;;
+            --no-conf) use_conf=0; shift ;;
             *)       extra_ips+=("$1"); shift ;;
         esac
     done
 
-    # Whitelist = SERVER_IPS из конфига (Happ detect) + переданные IP.
+    # Whitelist = SERVER_IPS from the config (Happ detect) + the passed IPs.
+    # --no-conf: the caller passed the complete current server set, so the
+    # saved IPs (whatever was detected last time) must not leak back in.
     local ips=""
-    if [[ -f $CONF ]]; then
+    if [[ $use_conf -eq 1 && -f $CONF ]]; then
         # shellcheck disable=SC1090
         . "$CONF"
         ips="${SERVER_IPS:-}"
@@ -81,7 +90,7 @@ on() {
         ips+=" $ip"
     done
     ips="${ips# }"
-    [[ -n $ips ]] || die "whitelist пуст — сначала: happ-killswitch detect (Happ должен быть подключён)"
+    [[ -n $ips ]] || die "whitelist is empty — run first: happ-killswitch detect (Happ must be connected)"
 
     local addrs=""
     for ip in $ips; do
@@ -95,8 +104,8 @@ on() {
 "
     done
 
-    # Идемпотентно: пересоздаём таблицу целиком, чтобы повторный вызов
-    # (переключение сервера/провайдера) просто пересобирал правила.
+    # Idempotent: recreate the whole table so a repeated call
+    # (server/provider switch) simply rebuilds the rules.
     $SUDO nft delete table inet happ-ks 2>/dev/null || true
     $SUDO nft -f - <<EOF
 table inet happ-ks {
@@ -104,6 +113,7 @@ table inet happ-ks {
     type filter hook output priority 0; policy drop;
 
     oifname "lo"        accept
+    meta mark $XRAY_MARK accept
     oifname "happ-*"    accept
 $iface_rules    udp dport 53          accept
     tcp dport 53          accept
@@ -115,28 +125,28 @@ $addrs
   }
 }
 EOF
-    echo "killswitch ВКЛЮЧЁН (сервера: $ips)"
+    echo "killswitch ON (servers: $ips)"
 }
 
 off() {
     $SUDO nft delete table inet happ-ks 2>/dev/null \
-        && echo "killswitch ВЫКЛЮЧЁН, правила удалены" \
-        || echo "killswitch и не был включён"
+        && echo "killswitch OFF, rules removed" \
+        || echo "killswitch was not on"
 }
 
 status() {
     if nft list table inet happ-ks 2>/dev/null; then
         echo
-        echo "--- тест: выход через туннель ---"
-        curl -s --max-time 8 ifconfig.me && echo || echo "НЕДОСТУПЕН"
+        echo "--- test: egress through the tunnel ---"
+        curl -s --max-time 8 ifconfig.me && echo || echo "UNREACHABLE"
     else
-        echo "killswitch выключен"
+        echo "killswitch is off"
     fi
 }
 
 is_on() {
-    # exit 0 когда таблица есть. Для непривилегированных вызывающих:
-    #   sudo -n happ-killswitch is-on   (nft напрямую требует CAP_NET_ADMIN)
+    # exit 0 when the table exists. For unprivileged callers:
+    #   sudo -n happ-killswitch is-on   (nft directly needs CAP_NET_ADMIN)
     nft list table inet happ-ks >/dev/null 2>&1
 }
 
@@ -146,5 +156,5 @@ case "${1:-}" in
     off)    shift; off "$@" ;;
     status) shift; status "$@" ;;
     is-on)  shift; is_on "$@" ;;
-    *)      grep '^#' "$0" | head -20; exit 1 ;;
+    *)      awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0"; exit 1 ;;
 esac

@@ -171,7 +171,7 @@ def test_resolve_endpoint_ips(monkeypatch):
         if host == "dead.example":
             raise OSError("NXDOMAIN")
         if host == "v6-only.example":
-            return []  # A-записи нет — запрос с AF_INET пуст
+            return []  # no A record — the AF_INET query comes back empty
         return [(socket.AF_INET, 0, 0, "", ("93.184.216.34", 0))]
 
     monkeypatch.setattr(killswitch.socket, "getaddrinfo", fake_getaddrinfo)
@@ -191,14 +191,14 @@ def test_resume_for_happ_extra_ips_bypass_detect(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(killswitch, "is_enabled", lambda: True)
     assert killswitch.resume_for_happ(extra_ips=["2.26.86.35"]).success
-    assert calls == [{"extra_ips": ["2.26.86.35"]}]
+    assert calls == [{"extra_ips": ["2.26.86.35"], "fresh": True}]
 
     monkeypatch.setattr(killswitch, "is_enabled", lambda: False)
     cfg = killswitch.config.load_config()
     cfg.killswitch_mode = "all"
     killswitch.config.save_config(cfg)
     assert killswitch.resume_for_happ(extra_ips=["2.26.86.35"]).success
-    assert calls[-1] == {"extra_ips": ["2.26.86.35"]}
+    assert calls[-1] == {"extra_ips": ["2.26.86.35"], "fresh": True}
 
     cfg.killswitch_mode = "off"
     killswitch.config.save_config(cfg)
@@ -229,3 +229,40 @@ def test_resume_for_happ_mode_off_noop(monkeypatch, tmp_path):
     monkeypatch.setattr(killswitch.config, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(killswitch, "is_enabled", lambda: False)
     assert killswitch.resume_for_happ() is None
+
+
+def test_enable_fresh_skips_detect_and_saved_ips(monkeypatch):
+    """Known server IPs: no `detect` (it scrapes every TCP session on the
+    physical NIC — direct-routed sites included) and no merging of the saved
+    conf (IPs of whatever server was detected last time)."""
+    calls = []
+    monkeypatch.setattr(
+        killswitch, "_sudo", lambda *a: calls.append(a) or ActionResult(True, "ok")
+    )
+    assert killswitch.enable(extra_ips=["1.2.3.4"], fresh=True).success
+    assert calls == [("on", "--no-conf", "1.2.3.4")]
+
+
+def test_resume_for_happ_unresolved_server_keeps_detect_path(monkeypatch, tmp_path):
+    # empty list = the caller couldn't resolve the server: nothing to be fresh with
+    monkeypatch.setattr(killswitch.config, "CONFIG_PATH", tmp_path / "config.json")
+    calls = []
+    monkeypatch.setattr(
+        killswitch, "enable", lambda **kw: calls.append(kw) or ActionResult(True, "ok")
+    )
+    monkeypatch.setattr(killswitch, "is_enabled", lambda: True)
+    killswitch.resume_for_happ(extra_ips=[])
+    assert calls == [{"extra_ips": []}]
+
+
+def test_script_accepts_xray_mark_and_no_conf():
+    """The nft ruleset must accept exactly the mark build_runtime_config puts
+    on xray's proxy outbounds, and `on` must support --no-conf."""
+    from pathlib import Path
+
+    import happmeta
+
+    script = (Path(__file__).resolve().parent.parent / "scripts/happ-killswitch").read_text()
+    assert f"XRAY_MARK={happmeta.KILLSWITCH_MARK:#x}\n" in script
+    assert "meta mark $XRAY_MARK accept" in script
+    assert "--no-conf)" in script

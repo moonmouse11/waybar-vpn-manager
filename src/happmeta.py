@@ -23,6 +23,7 @@ import statistics
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -76,9 +77,19 @@ DEFAULT_INBOUNDS = [
     },
 ]
 
+# SO_MARK put on xray's proxy outbounds (+ its own resolver, dns-direct);
+# scripts/happ-killswitch accepts exactly this mark, so the killswitch lets
+# the tunnel's own traffic out without guessing server IPs (balancers, UDP
+# transports, domain addresses) — and when xray is down nothing carries it.
+KILLSWITCH_MARK = 0x6B73  # "ks"
+NON_PROXY_PROTOCOLS = ("freedom", "blackhole", "dns")
+
 LOCAL_ROUTING_RULES = [
     {"inboundTag": ["tun-in"], "outboundTag": "direct", "process": ["self/", "xray"]},
-    {"inboundTag": ["dns-in"], "outboundTag": "direct"},
+    # xray's own resolver: needed to bootstrap a domain-based server address
+    # (CLAUDE.md, IPv6 leak guard) — a dedicated, killswitch-marked freedom
+    # outbound, so blocking split-tunnel "direct" can't break the tunnel itself
+    {"inboundTag": ["dns-in"], "outboundTag": "dns-direct"},
     {"inboundTag": ["tun-in"], "network": "tcp,udp", "outboundTag": "dns-out", "port": "53"},
 ]
 CATCH_ALL_RULE = {"network": "tcp,udp", "outboundTag": "proxy"}
@@ -459,6 +470,10 @@ def build_runtime_config(server_cfg: dict) -> dict:
     cfg["dns"] = dns
 
     outbounds = cfg.get("outbounds") or []
+    proxies = [o for o in outbounds if o.get("protocol") not in NON_PROXY_PROTOCOLS]
+    for outbound in proxies:
+        _set_mark(outbound)
+    outbounds.append(_set_mark({"protocol": "freedom", "tag": "dns-direct"}))
     dns_outbound = next((o for o in outbounds if o.get("protocol") == "dns"), None)
     if dns_outbound is None:
         dns_outbound = {"protocol": "dns", "tag": "dns-out"}
@@ -467,8 +482,13 @@ def build_runtime_config(server_cfg: dict) -> dict:
     # dns-in rule below (outboundTag "direct") — i.e. straight out the
     # real network, leaking resolver identity/location even though app
     # traffic tunnels through "proxy". Chaining dns-out's own transport
-    # through "proxy" keeps queries inside the tunnel instead.
-    dns_outbound.setdefault("proxySettings", {"tag": "proxy", "transportLayer": True})
+    # through "proxy" keeps queries inside the tunnel instead. Balancer
+    # configs have no "proxy" tag at all — chain through their first real
+    # proxy outbound rather than a tag that resolves to nothing.
+    tags = [o.get("tag") for o in proxies if o.get("tag")]
+    if tags:
+        via = "proxy" if "proxy" in tags else tags[0]
+        dns_outbound.setdefault("proxySettings", {"tag": via, "transportLayer": True})
     cfg["outbounds"] = outbounds
 
     rules = list(cfg.get("routing", {}).get("rules", []))
@@ -478,6 +498,12 @@ def build_runtime_config(server_cfg: dict) -> dict:
     cfg.setdefault("routing", {})["rules"] = [*LOCAL_ROUTING_RULES, *rules, CATCH_ALL_RULE]
     cfg["log"] = {"loglevel": "info"}
     return cfg
+
+
+def _set_mark(outbound: dict) -> dict:
+    sockopt = outbound.setdefault("streamSettings", {}).setdefault("sockopt", {})
+    sockopt["mark"] = KILLSWITCH_MARK
+    return outbound
 
 
 # ── Server registry: subscription + captured union ────────────────────────────
@@ -519,7 +545,7 @@ def all_servers(allow_fetch: bool = True) -> list[dict]:
     # or rotate a server onto a new address under the same display name,
     # which would otherwise leave the old capture looking like a distinct,
     # provider-less duplicate of a server that's actually still around
-    # (see CLAUDE.md's "Прочие / без провайдера" notes) — a capture whose
+    # (see CLAUDE.md's "Other / no provider" notes) — a capture whose
     # own address can't be parsed falls back to the name-only check so it
     # is never wrongly hidden.
     known_names = {s["name"] for s in servers}
@@ -536,7 +562,7 @@ def all_servers(allow_fetch: bool = True) -> list[dict]:
             {
                 "name": name,
                 "provider_id": "",
-                "provider_name": "Прочие / без провайдера",
+                "provider_name": "Other / no provider",
                 "config": cfg,
             }
         )
@@ -585,7 +611,7 @@ def _real_outbound(cfg: dict) -> dict | None:
     the first non-dns/freedom outbound), or None."""
     outbounds = cfg.get("outbounds") or []
     return next((o for o in outbounds if o.get("protocol") == "vless"), None) or next(
-        (o for o in outbounds if o.get("protocol") not in ("dns", "freedom")), None
+        (o for o in outbounds if o.get("protocol") not in NON_PROXY_PROTOCOLS), None
     )
 
 
@@ -602,11 +628,49 @@ def _outbound_target(cfg: dict) -> tuple[str, int] | None:
             target = settings["vnext"][0]
         elif "servers" in settings:  # trojan / shadowsocks
             target = settings["servers"][0]
+        elif "address" in settings:  # hysteria and other flat-settings outbounds
+            target = settings
         else:
             return None
         return (target["address"], target["port"])
     except (KeyError, IndexError, TypeError):
         return None
+
+
+def subscription_targets() -> list[tuple[str, str, int]]:
+    """(provider name, host, port) of every subscription URL — the killswitch
+    must let these through: the plugin fetches subscriptions through xray,
+    and Happ's routing often sends a Russian-hosted subscription host
+    `direct`, which the killswitch otherwise blocks (subscriptions then
+    can't refresh, and a cleared cache leaves the Happ menu empty)."""
+    targets = []
+    for prov in providers().values():
+        url = urllib.parse.urlsplit(prov.get("url") or "")
+        if url.hostname:
+            targets.append((prov["name"], url.hostname, url.port or 443))
+    return targets
+
+
+def server_endpoints_of(cfg: dict) -> list[tuple[str, int]]:
+    """(host, port) of EVERY proxy outbound — a balancer config fans out
+    over several servers and xray may dial any of them, so a killswitch
+    whitelist built from _outbound_target()'s first match alone would cut
+    the tunnel the moment the balancer picks another member."""
+    endpoints = []
+    for outbound in cfg.get("outbounds") or []:
+        if outbound.get("protocol") in NON_PROXY_PROTOCOLS:
+            continue
+        target = _outbound_target({"outbounds": [outbound]})
+        if target is not None and target not in endpoints:
+            endpoints.append(target)
+    return endpoints
+
+
+def server_endpoints(
+    name: str, allow_fetch: bool = True, provider_id: str | None = None
+) -> list[tuple[str, int]]:
+    cfg = resolve_config(name, allow_fetch=allow_fetch, provider_id=provider_id)
+    return server_endpoints_of(cfg) if cfg else []
 
 
 def server_params(
@@ -756,18 +820,23 @@ def ping_mark(name: str) -> str:
     return f"✓ {entry['ms']:.0f} ms"
 
 
-def server_info_suffix(name: str) -> str:
-    """'✓ 42 ms · trojan/ws' for menu labels — ping_mark plus xray protocol
-    info. The standard vless/tcp/reality tuple is omitted (it is the common
-    case); a server never measured stays unmarked so the label does not get
-    noisy."""
-    mark = ping_mark(name)
-    if not mark or mark == "⛔":
-        return mark
-    parts = [mark]
-    params = server_params(name)
-    if params:
-        proto = (params["protocol"], params["network"], params["security"])
-        if proto != ("vless", "tcp", "reality"):
-            parts.append("/".join(p for p in proto if p))
-    return " · ".join(parts)
+def protocol_label(cfg: dict) -> str:
+    """'vless/tcp/reality', 'hysteria/tls', 'trojan/ws/tls' — the server
+    outbound's protocol/transport/security, '' when there is none. A
+    transport that just repeats the protocol name (hysteria) is dropped."""
+    outbound = _real_outbound(cfg)
+    if outbound is None or not outbound.get("protocol"):
+        return ""
+    stream = outbound.get("streamSettings") or {}
+    protocol = outbound["protocol"]
+    network = stream.get("network", "tcp")
+    parts = [protocol, "" if network == protocol else network, stream.get("security", "")]
+    return "/".join(p for p in parts if p)
+
+
+def server_info_suffix(name: str, protocol: str = "") -> str:
+    """'✓ 42 ms · vless/tcp/reality' for menu labels — ping_mark plus the
+    protocol (precomputed by the caller via protocol_label() from configs it
+    already holds: resolving per server here would re-read every
+    subscription cache per row and could fetch a stale one synchronously)."""
+    return " · ".join(p for p in (ping_mark(name), protocol) if p)
