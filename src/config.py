@@ -9,7 +9,8 @@ All keys optional; missing file means defaults:
   "happ_gui_fallback": false,           // launch the Happ window when headless connect fails
   "exit_ip": {"enabled": true, "max_age_seconds": 600},
   "ip_sources": {"abuseipdb": {"api_key": "secret"}},  // IP source configurations
-  "tools_visible": {"dns_leak_test": false}           // hide tools from menu
+  "tools_visible": {"dns_leak_test": false},          // hide tools from menu
+  "speed_test_urls": ["http://10.0.0.5/100MB.bin"]     // extra Speed Test targets
 }
 """
 
@@ -33,6 +34,7 @@ class Config:
     exit_ip_max_age: int = 600
     ip_sources: dict[str, dict] = field(default_factory=dict)
     tools_visible: dict[str, bool] = field(default_factory=dict)
+    speed_test_urls: list[str] = field(default_factory=list)
 
     def provider_visible(self, name: str) -> bool:
         return self.providers.get(name.lower(), True)
@@ -76,6 +78,10 @@ def load_config() -> Config:
     tools_visible = raw.get("tools_visible")
     if isinstance(tools_visible, dict):
         cfg.tools_visible = {str(k): bool(v) for k, v in tools_visible.items()}
+
+    speed_test_urls = raw.get("speed_test_urls")
+    if isinstance(speed_test_urls, list):
+        cfg.speed_test_urls = [u for u in speed_test_urls if isinstance(u, str) and u]
     return cfg
 
 
@@ -91,5 +97,6 @@ def save_config(cfg: Config) -> None:
         },
         "ip_sources": cfg.ip_sources,
         "tools_visible": cfg.tools_visible,
+        "speed_test_urls": cfg.speed_test_urls,
     }
     fsutil.write_json_atomic(CONFIG_PATH, raw, indent=2)

@@ -432,13 +432,89 @@ def ip_info_menu() -> ActionResult:
     return ActionResult(True, "")
 
 
+SPEED_TEST_ALL_LABEL = "🌍 All services"
+SPEED_TEST_CUSTOM_LABEL = "✏ Custom URL…"
+SPEED_TEST_MAX_URLS = 5  # remembered custom URLs, newest first
+# per service in "All services" — run one after another (in parallel they'd
+# split the same uplink and each report a fraction of it), so this keeps
+# the whole sweep around half a minute
+SPEED_TEST_ALL_DURATION = 5.0
+
+
 def speed_test_menu() -> ActionResult:
-    """Single-measurement download throughput through the current tunnel."""
-    notify("Speed Test", "Test started, this takes a few seconds…")
-    mbps = speedtest.measure()
-    if mbps is None:
-        return ActionResult(False, "Test failed — no network?")
-    return ActionResult(True, f"⬇ {mbps:.1f} MB/s")
+    """Pick a service (or all of them), then measure download throughput
+    through whatever the current route is (tunnel or, with no VPN up, the
+    plain uplink). Results open in their own walker window, like the DNS
+    leak test — a multi-service comparison doesn't fit a notify bubble."""
+    # public presets, then custom URLs remembered in config.json
+    # (`speed_test_urls` — e.g. a test stand's own file server)
+    targets = [("🌐", s.name, s.url) for s in speedtest.SERVICES]
+    targets += [("🔗", url, url) for url in config.load_config().speed_test_urls]
+    every = [(name, url) for _icon, name, url in targets]
+    items: list[tuple[str, callable]] = [
+        (SPEED_TEST_ALL_LABEL, lambda: _run_speed_tests(every, SPEED_TEST_ALL_DURATION))
+    ]
+    items += [
+        (f"{icon} {name}", lambda t=(name, url): _run_speed_tests([t]))
+        for icon, name, url in targets
+    ]
+    items.append((SPEED_TEST_CUSTOM_LABEL, _speed_test_custom_url))
+    items.append((BACK_LABEL, tools_menu))
+    run_items(_unique_labels(items), prompt="Speed Test")
+    return ActionResult(True, "")
+
+
+def _speed_test_custom_url() -> ActionResult:
+    url = walker_input("Speed test URL (http/https, large file)")
+    if not url:
+        return ActionResult(False, "No URL entered")
+    if not speedtest.is_valid_url(url):
+        return ActionResult(False, f"Not an http(s) URL: {url}")
+    cfg = config.load_config()
+    cfg.speed_test_urls = [url, *(u for u in cfg.speed_test_urls if u != url)][:SPEED_TEST_MAX_URLS]
+    config.save_config(cfg)
+    return _run_speed_tests([(url, url)])
+
+
+def _run_speed_tests(
+    targets: list[tuple[str, str]], duration: float = speedtest.DURATION
+) -> ActionResult:
+    """Measure each target in turn (progress via notify — the walker window
+    can't update while a test runs), then show every result in one window."""
+    results = []
+    for i, (name, url) in enumerate(targets, 1):
+        step = f"{i}/{len(targets)} · " if len(targets) > 1 else ""
+        notify("Speed Test", f"{step}{name}: measuring for ~{duration:.0f} s…")
+        results.append((name, speedtest.measure(url, duration)))
+
+    noop = lambda: ActionResult(True, "")  # noqa: E731 — info rows do nothing
+    active = active_connections()
+    items: list[tuple[str, callable]] = [
+        (_speed_test_route_row(active), noop),
+        *((_speed_test_result_row(name, m), noop) for name, m in results),
+    ]
+    ok = [(name, m.mbps) for name, m in results if m.mbps is not None]
+    if len(results) > 1 and ok:
+        best = max(ok, key=lambda r: r[1])
+        items.append((f"🏆 Fastest: {best[0]} ({best[1]:.1f} Mbit/s)", noop))
+    if not ok and killswitch.is_enabled() and not active:
+        items.append(("⚠ Killswitch is on and no VPN is active — traffic is blocked", noop))
+    items.append(("🔁 Run again", lambda: _run_speed_tests(targets, duration)))
+    items.append((BACK_LABEL, speed_test_menu))
+    run_items(_unique_labels(items), prompt="Speed Test")
+    return ActionResult(True, "")
+
+
+def _speed_test_route_row(active: list[VPNConnection]) -> str:
+    if not active:
+        return "Route: direct (no VPN)"
+    return "Route: " + ", ".join(c.label for c in active)
+
+
+def _speed_test_result_row(name: str, m: speedtest.Measurement) -> str:
+    if m.mbps is not None:
+        return f"{name}: ⬇ {m.mbps:.1f} Mbit/s"
+    return f"{name}: ✗ {m.error}"
 
 
 def refresh_all_menu() -> ActionResult:
