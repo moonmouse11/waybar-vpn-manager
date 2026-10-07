@@ -1,3 +1,5 @@
+import pytest
+
 import config
 import vpn_manager
 from ipsources.base import IPFinding
@@ -760,19 +762,148 @@ def test_tools_menu_hides_disabled_tool(monkeypatch):
     assert "ℹ️ IP Info" in seen[0]  # untouched key stays visible
 
 
-def test_speed_test_menu_happy_path(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager.speedtest, "measure", lambda: 12.34)
-    result = vpn_manager.speed_test_menu()
-    assert result.success
-    assert "12.3" in result.message
+def _speed_test_env(monkeypatch, *, measure, ks_on=False, active=(), urls=(), picks=()):
+    """picks: walker selections in order; once exhausted walker returns None
+    (window closed). Returns (cfg, notes, windows) — windows is every
+    (prompt, rows) walker was shown."""
+    notes, windows = [], []
+    picks = iter(picks)
+    cfg = config.Config(speed_test_urls=list(urls))
+    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: cfg)
+    monkeypatch.setattr(vpn_manager, "notify", lambda t, m, urgent=False: notes.append(m))
+    monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
+    monkeypatch.setattr(vpn_manager.speedtest, "measure", measure)
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: ks_on)
+    monkeypatch.setattr(vpn_manager, "active_connections", lambda: list(active))
+    monkeypatch.setattr(
+        vpn_manager,
+        "walker_select",
+        lambda options, prompt="": windows.append((prompt, list(options))) or next(picks, None),
+    )
+    return cfg, notes, windows
 
 
-def test_speed_test_menu_network_failure(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager.speedtest, "measure", lambda: None)
+def _ok(mbps):
+    return vpn_manager.speedtest.Measurement(mbps=mbps)
+
+
+def _err(reason):
+    return vpn_manager.speedtest.Measurement(error=reason)
+
+
+def test_speed_test_menu_lists_all_presets_custom_urls_and_custom_row(monkeypatch):
+    *_, windows = _speed_test_env(
+        monkeypatch, measure=lambda url, d: _ok(1.0), urls=["http://10.0.0.5/f.bin"]
+    )
+    vpn_manager.speed_test_menu()
+    rows = windows[0][1]
+    assert rows[0] == vpn_manager.SPEED_TEST_ALL_LABEL
+    for s in vpn_manager.speedtest.SERVICES:
+        assert f"🌐 {s.name}" in rows
+    assert "🔗 http://10.0.0.5/f.bin" in rows
+    assert rows[-2:] == [vpn_manager.SPEED_TEST_CUSTOM_LABEL, "‹ Back"]
+
+
+def test_speed_test_single_service_shows_result_in_window_not_notification(monkeypatch):
+    called = []
+    svc = vpn_manager.speedtest.SERVICES[0]
+    _, notes, windows = _speed_test_env(
+        monkeypatch,
+        measure=lambda url, d: called.append((url, d)) or _ok(123.45),
+        picks=[f"🌐 {svc.name}"],
+    )
     result = vpn_manager.speed_test_menu()
-    assert not result.success
+    assert called == [(svc.url, vpn_manager.speedtest.DURATION)]
+    assert result.message == ""
+    assert not any("Mbit/s" in m for m in notes)  # only the progress bubble
+    prompt, rows = windows[1]
+    assert prompt == vpn_manager.SPEED_TEST_TITLE
+    assert rows[0] == "Route: direct (no VPN)"
+    assert f"{svc.name}: ⬇ 123.5 Mbit/s" in rows
+    assert not any(r.startswith("🏆") for r in rows)  # single result — nothing to compare
+    assert rows[-2:] == ["🔁 Run again", "‹ Back"]
+
+
+def test_speed_test_all_services_runs_each_in_turn_and_names_fastest(monkeypatch):
+    speeds = {
+        "http://a": _ok(50.0),
+        "http://b": _err("HTTPError: HTTP Error 403"),
+        "http://c": _ok(90.0),
+    }
+    monkeypatch.setattr(
+        vpn_manager.speedtest,
+        "SERVICES",
+        [vpn_manager.speedtest.Service(k, k.upper(), f"http://{k}") for k in "ab"],
+    )
+    called = []
+    _, notes, windows = _speed_test_env(
+        monkeypatch,
+        measure=lambda url, d: called.append((url, d)) or speeds[url],
+        urls=["http://c"],
+        picks=[vpn_manager.SPEED_TEST_ALL_LABEL],
+    )
+    vpn_manager.speed_test_menu()
+    d = vpn_manager.SPEED_TEST_ALL_DURATION
+    assert called == [("http://a", d), ("http://b", d), ("http://c", d)]
+    assert [m.split(":")[0] for m in notes] == ["1/3 · A", "2/3 · B", "3/3 · http"]
+    rows = windows[1][1]
+    assert "A: ⬇ 50.0 Mbit/s" in rows
+    assert "B: ✗ HTTPError: HTTP Error 403" in rows
+    assert "http://c: ⬇ 90.0 Mbit/s" in rows
+    assert "🏆 Fastest: http://c (90.0 Mbit/s)" in rows
+
+
+def test_speed_test_run_again_repeats_same_targets(monkeypatch):
+    called = []
+    _speed_test_env(
+        monkeypatch,
+        measure=lambda url, d: called.append(url) or _ok(1.0),
+        picks=["🔁 Run again"],
+    )
+    vpn_manager._run_speed_tests([("X", "http://x")])
+    assert called == ["http://x", "http://x"]
+
+
+def test_speed_test_route_row_names_active_vpn(monkeypatch):
+    conn = VPNConnection(name="de1", provider="WireGuard", active=True)
+    *_, windows = _speed_test_env(monkeypatch, measure=lambda url, d: _ok(1.0), active=[conn])
+    vpn_manager._run_speed_tests([("X", "http://x")])
+    assert windows[0][1][0] == f"Route: {conn.label}"
+
+
+def test_speed_test_custom_url_is_measured_and_remembered(monkeypatch):
+    saved, called = [], []
+    _speed_test_env(
+        monkeypatch,
+        measure=lambda url, d: called.append(url) or _ok(5.0),
+        urls=["http://old/a", "http://new/b"],
+    )
+    monkeypatch.setattr(vpn_manager.config, "save_config", saved.append)
+    monkeypatch.setattr(vpn_manager, "walker_input", lambda prompt: "http://new/b")
+    assert vpn_manager._speed_test_custom_url().success
+    assert called == ["http://new/b"]
+    assert saved and saved[0].speed_test_urls == ["http://new/b", "http://old/a"]
+
+
+def test_speed_test_custom_url_rejects_non_http(monkeypatch):
+    _speed_test_env(monkeypatch, measure=lambda url, d: _ok(5.0))
+    monkeypatch.setattr(vpn_manager.config, "save_config", lambda cfg: pytest.fail("saved"))
+    monkeypatch.setattr(vpn_manager, "walker_input", lambda prompt: "file:///etc/passwd")
+    assert not vpn_manager._speed_test_custom_url().success
+
+
+def test_speed_test_failure_explains_killswitch_without_vpn(monkeypatch):
+    *_, windows = _speed_test_env(monkeypatch, measure=lambda url, d: _err("URLError"), ks_on=True)
+    vpn_manager._run_speed_tests([("X", "http://x")])
+    assert any("Killswitch is on" in r for r in windows[0][1])
+
+
+def test_speed_test_failure_without_killswitch_has_no_killswitch_row(monkeypatch):
+    *_, windows = _speed_test_env(monkeypatch, measure=lambda url, d: _err("URLError"))
+    vpn_manager._run_speed_tests([("X", "http://x")])
+    rows = windows[0][1]
+    assert "X: ✗ URLError" in rows
+    assert not any("Killswitch" in r for r in rows)
 
 
 def test_dns_leak_server_row_country_alone_is_not_a_leak():
