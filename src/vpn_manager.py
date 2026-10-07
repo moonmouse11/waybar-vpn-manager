@@ -432,6 +432,7 @@ def ip_info_menu() -> ActionResult:
     return ActionResult(True, "")
 
 
+SPEED_TEST_TITLE = "Speed Test"  # walker prompt + progress notification title
 SPEED_TEST_ALL_LABEL = "🌍 All services"
 SPEED_TEST_CUSTOM_LABEL = "✏ Custom URL…"
 SPEED_TEST_MAX_URLS = 5  # remembered custom URLs, newest first
@@ -460,7 +461,7 @@ def speed_test_menu() -> ActionResult:
     ]
     items.append((SPEED_TEST_CUSTOM_LABEL, _speed_test_custom_url))
     items.append((BACK_LABEL, tools_menu))
-    run_items(_unique_labels(items), prompt="Speed Test")
+    run_items(_unique_labels(items), prompt=SPEED_TEST_TITLE)
     return ActionResult(True, "")
 
 
@@ -484,7 +485,7 @@ def _run_speed_tests(
     results = []
     for i, (name, url) in enumerate(targets, 1):
         step = f"{i}/{len(targets)} · " if len(targets) > 1 else ""
-        notify("Speed Test", f"{step}{name}: measuring for ~{duration:.0f} s…")
+        notify(SPEED_TEST_TITLE, f"{step}{name}: measuring for ~{duration:.0f} s…")
         results.append((name, speedtest.measure(url, duration)))
 
     noop = lambda: ActionResult(True, "")  # noqa: E731 — info rows do nothing
@@ -501,7 +502,7 @@ def _run_speed_tests(
         items.append(("⚠ Killswitch is on and no VPN is active — traffic is blocked", noop))
     items.append(("🔁 Run again", lambda: _run_speed_tests(targets, duration)))
     items.append((BACK_LABEL, speed_test_menu))
-    run_items(_unique_labels(items), prompt="Speed Test")
+    run_items(_unique_labels(items), prompt=SPEED_TEST_TITLE)
     return ActionResult(True, "")
 
 

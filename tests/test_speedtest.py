@@ -48,14 +48,14 @@ def test_measure_stops_after_duration(monkeypatch):
     assert resp._left == 10**12 - 3 * speedtest.CHUNK
 
 
-def test_measure_sends_browser_user_agent(monkeypatch):
+def test_measure_sends_own_user_agent(monkeypatch):
     seen = []
     monkeypatch.setattr(
         speedtest.urllib.request, "urlopen", lambda req, timeout: seen.append(req) or _Resp(1)
     )
     _clock(monkeypatch, 1.0)
     speedtest.measure("http://x")
-    assert seen[0].get_header("User-agent") == "Mozilla/5.0"
+    assert seen[0].get_header("User-agent") == speedtest.USER_AGENT
 
 
 def test_measure_reports_error_and_logs_on_network_failure(monkeypatch):
@@ -108,3 +108,9 @@ def test_measure_error_is_truncated_for_the_results_window(monkeypatch):
 
     monkeypatch.setattr(speedtest.urllib.request, "urlopen", boom)
     assert len(speedtest.measure("http://x").error) == speedtest.ERROR_MAXLEN
+
+
+def test_presets_are_https_only():
+    # payload is junk bytes, but SonarCloud (python:S5332) flags clear-text
+    # http literals — custom URLs may still be http (e.g. a test stand)
+    assert all(s.url.startswith("https://") for s in speedtest.SERVICES)

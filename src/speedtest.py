@@ -18,6 +18,10 @@ import logutil
 DURATION = 10.0  # seconds of transfer to average over
 TIMEOUT = 15  # per socket operation (connect / each read)
 CHUNK = 64 * 1024
+# Cloudflare 403s urllib's default "Python-urllib/x.y"; Hetzner resets the
+# connection on a bare "Mozilla/5.0" (fake-browser filter). An honest
+# product UA passes both.
+USER_AGENT = "waybar-vpn-manager/1.0"
 ERROR_MAXLEN = 80  # keeps a failure row readable in the walker window
 
 
@@ -30,10 +34,11 @@ class Service:
 
 SERVICES = [
     # Cloudflare 403s above 50 MB per request (and to urllib's default
-    # User-Agent — a browser-like one is always sent, see measure())
+    # User-Agent — see USER_AGENT)
     Service("cloudflare", "Cloudflare", "https://speed.cloudflare.com/__down?bytes=50000000"),
     Service("ovh", "OVH (FR)", "https://proof.ovh.net/files/100Mb.dat"),
-    Service("tele2", "Tele2 (SE)", "http://speedtest.tele2.net/100MB.zip"),
+    # fsn1-speed.hetzner.com reset connections from some VPN exits; nbg1 didn't
+    Service("hetzner", "Hetzner (DE)", "https://nbg1-speed.hetzner.com/100MB.bin"),
 ]
 
 
@@ -56,7 +61,7 @@ def measure(url: str, duration: float = DURATION) -> Measurement:
 
     The clock starts once the response headers arrive, so DNS/TLS setup
     and time-to-first-byte don't drag the figure down."""
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     n = 0
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:

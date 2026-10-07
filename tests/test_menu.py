@@ -817,7 +817,7 @@ def test_speed_test_single_service_shows_result_in_window_not_notification(monke
     assert result.message == ""
     assert not any("Mbit/s" in m for m in notes)  # only the progress bubble
     prompt, rows = windows[1]
-    assert prompt == "Speed Test"
+    assert prompt == vpn_manager.SPEED_TEST_TITLE
     assert rows[0] == "Route: direct (no VPN)"
     assert f"{svc.name}: ⬇ 123.5 Mbit/s" in rows
     assert not any(r.startswith("🏆") for r in rows)  # single result — nothing to compare
