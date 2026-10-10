@@ -139,10 +139,257 @@ _HYSTERIA_BALANCER = {
     },
 }
 
+def _vless(tag: str, address: str, flow: str = "xtls-rprx-vision") -> dict:
+    """vless+tcp+reality — the most common outbound across real subscriptions."""
+    return {
+        "tag": tag,
+        "protocol": "vless",
+        "settings": {
+            "vnext": [
+                {
+                    "address": address,
+                    "port": 443,
+                    "users": [{"id": UUID, "encryption": "none", "flow": flow}],
+                }
+            ]
+        },
+        "streamSettings": {
+            "network": "tcp",
+            "tcpSettings": {},
+            "security": "reality",
+            "realitySettings": {
+                "serverName": "www.example.org",
+                "publicKey": REALITY_PBK,
+                "shortId": "ab12",
+                "fingerprint": "firefox",
+            },
+        },
+    }
+
+
+def _hysteria_masked(tag: str, address: str) -> dict:
+    """hysteria2 over h3/TLS with a salamander UDP mask and QUIC tuning — the
+    shape real subscriptions ship (finalmask/quicParams values are theirs)."""
+    return {
+        "tag": tag,
+        "protocol": "hysteria",
+        "settings": {"address": address, "port": 443, "version": 2},
+        "streamSettings": {
+            "network": "hysteria",
+            "hysteriaSettings": {"version": 2, "auth": "dummy-auth"},
+            "security": "tls",
+            "tlsSettings": {"serverName": address, "fingerprint": "chrome", "alpn": ["h3"]},
+            "finalmask": {
+                "udp": [{"type": "salamander", "settings": {"password": "dummy-obfs"}}],
+                "quicParams": {
+                    "bbrProfile": "standard",
+                    "congestion": "bbr",
+                    "maxIdleTimeout": 30,
+                    "keepAlivePeriod": 10,
+                    "maxStreamReceiveWindow": 8388608,
+                    "initStreamReceiveWindow": 8388608,
+                    "maxConnectionReceiveWindow": 20971520,
+                    "initConnectionReceiveWindow": 20971520,
+                },
+            },
+        },
+    }
+
+
+# leastPing balancer over masked hysteria members, fed by burstObservatory
+_HYSTERIA_MASKED_LEASTPING = {
+    "remarks": "🇫🇮 Finland Hy2",
+    "outbounds": [
+        _hysteria_masked("candidate-1", "fi1.example.com"),
+        _hysteria_masked("candidate-2", "fi2.example.com"),
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"},
+    ],
+    "burstObservatory": {
+        "subjectSelector": ["candidate-"],
+        "pingConfig": {
+            "destination": "https://www.example.com/generate_204",
+            "connectivity": "",
+            "interval": "8s",
+            "timeout": "3s",
+            "sampling": 2,
+        },
+    },
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "balancers": [
+            {
+                "tag": "AUTO",
+                "selector": ["candidate-"],
+                "strategy": {"type": "leastPing"},
+                "fallbackTag": "candidate-1",
+            }
+        ],
+        "rules": [
+            {"type": "field", "network": "udp", "port": "443", "outboundTag": "block"},
+            {"type": "field", "inboundTag": ["socks", "http"], "balancerTag": "AUTO"},
+        ],
+    },
+}
+
+# Whitelist-bridge chain: an entry balancer falls back through loopback
+# outbounds into per-bridge balancers (the "to-*"/"lb-to-*"/"bal-*"
+# wiring is verbatim from a real subscription), observatory-driven. The
+# real one writes leastPing as balancer "settings": {"type": ...}, a key
+# xray silently ignores; "strategy" here so the strategy actually parses. Also
+# ships its own dns-out and a *balancer* tagged "direct" next to the
+# "direct" freedom outbound — both seen in the wild.
+_LOOPBACK_CHAIN = {
+    "remarks": "🇷🇺 Whitelist bypass",
+    "outbounds": [
+        _vless("candidate", "entry.example.com"),
+        _vless("wl-a", "bridge-a.example.com"),
+        _vless("wl-b", "bridge-b.example.com"),
+        _hysteria_masked("candidate-2", "hy.example.com"),
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"},
+        {"protocol": "dns", "tag": "dns-out"},
+        {"protocol": "loopback", "tag": "to-a", "settings": {"inboundTag": "lb-to-a"}},
+        {"protocol": "loopback", "tag": "to-proxy", "settings": {"inboundTag": "lb-to-proxy"}},
+    ],
+    "observatory": {
+        "subjectSelector": ["candidate"],
+        "probeUrl": "https://www.example.com/generate_204",
+        "probeInterval": "5m",
+        "enableConcurrency": True,
+    },
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "balancers": [
+            {
+                "tag": "ENTRY-PROXY",
+                "selector": ["candidate"],
+                "strategy": {"type": "leastPing"},
+                "fallbackTag": "to-a",
+            },
+            {"tag": "direct", "selector": ["direct"], "fallbackTag": "to-proxy"},
+            {"tag": "bal-a", "selector": ["wl-a"], "fallbackTag": "wl-b"},
+        ],
+        "rules": [
+            {"type": "field", "network": "udp", "port": "443", "outboundTag": "block"},
+            {"type": "field", "inboundTag": ["lb-to-a"], "balancerTag": "bal-a"},
+            {"type": "field", "inboundTag": ["lb-to-proxy"], "balancerTag": "ENTRY-PROXY"},
+            {"type": "field", "ip": ["geoip:ru"], "balancerTag": "direct"},
+            {"type": "field", "inboundTag": ["http", "socks"], "balancerTag": "ENTRY-PROXY"},
+        ],
+    },
+}
+
+# vless+xhttp over plain TLS, packet-up with tuning "extra" — note the
+# vmess-style leftovers (security/alterId/email, flow: null) some panels emit
+_VLESS_XHTTP_TLS_PACKET_UP = {
+    "remarks": "🇳🇱 NL xhttp",
+    "outbounds": [
+        {
+            "tag": "proxy",
+            "protocol": "vless",
+            "settings": {
+                "vnext": [
+                    {
+                        "address": "nl.example.com",
+                        "port": 443,
+                        "users": [
+                            {
+                                "id": UUID,
+                                "security": "auto",
+                                "encryption": "none",
+                                "email": "t@t.tt",
+                                "alterId": 0,
+                                "flow": None,
+                            }
+                        ],
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "security": "tls",
+                "tlsSettings": {
+                    "serverName": "nl.example.com",
+                    "allowInsecure": False,
+                    "fingerprint": "firefox",
+                    "alpn": ["h2", "http/1.1"],
+                    "show": False,
+                },
+                "xhttpSettings": {
+                    "mode": "packet-up",
+                    "path": "/xh",
+                    "host": "nl.example.com",
+                    "extra": {
+                        "scMaxEachPostBytes": 1000000,
+                        "scMaxConcurrentPosts": 100,
+                        "scMinPostsIntervalMs": 30,
+                        "xPaddingBytes": "100-1000",
+                        "noGRPCHeader": False,
+                    },
+                },
+            },
+        },
+        {"protocol": "freedom", "tag": "direct"},
+    ],
+}
+
+# Not (yet) in any of the user's subscriptions — guards against a provider
+# switching to them.
+_VMESS_WS_TLS = {
+    "remarks": "vmess ws",
+    "outbounds": [
+        {
+            "tag": "proxy",
+            "protocol": "vmess",
+            "settings": {
+                "vnext": [
+                    {
+                        "address": "vm.example.com",
+                        "port": 443,
+                        "users": [{"id": UUID, "alterId": 0, "security": "auto"}],
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "tlsSettings": {"serverName": "vm.example.com"},
+                "wsSettings": {"path": "/ws", "host": "vm.example.com"},
+            },
+        },
+        {"protocol": "freedom", "tag": "direct"},
+    ],
+}
+
+_TROJAN_TCP_TLS = {
+    "remarks": "trojan",
+    "outbounds": [
+        {
+            "tag": "proxy",
+            "protocol": "trojan",
+            "settings": {
+                "servers": [{"address": "tj.example.com", "port": 443, "password": "dummy"}]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {"serverName": "tj.example.com", "alpn": ["h2", "http/1.1"]},
+            },
+        },
+        {"protocol": "freedom", "tag": "direct"},
+    ],
+}
+
 HAPP_SERVERS = {
     "vless-reality-xhttp": _VLESS_REALITY_XHTTP,
     "vless-own-dns-outbound": _VLESS_WITH_OWN_DNS_OUTBOUND,
     "hysteria-balancer": _HYSTERIA_BALANCER,
+    "hysteria-masked-leastping": _HYSTERIA_MASKED_LEASTPING,
+    "loopback-chain": _LOOPBACK_CHAIN,
+    "vless-xhttp-tls-packet-up": _VLESS_XHTTP_TLS_PACKET_UP,
+    "vmess-ws-tls": _VMESS_WS_TLS,
+    "trojan-tcp-tls": _TROJAN_TCP_TLS,
 }
 
 KEY_URLS = {
