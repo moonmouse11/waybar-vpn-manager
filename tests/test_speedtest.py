@@ -98,6 +98,10 @@ def test_is_valid_url():
     assert speedtest.is_valid_url("https://example.com/x")
     assert not speedtest.is_valid_url("file:///etc/passwd")
     assert not speedtest.is_valid_url("https://")
+    assert not speedtest.is_valid_url("http://")
+    # shortest real hosts pass for both schemes alike
+    assert speedtest.is_valid_url("http://a")
+    assert speedtest.is_valid_url("https://a")
 
 
 def test_measure_error_is_truncated_for_the_results_window(monkeypatch):
