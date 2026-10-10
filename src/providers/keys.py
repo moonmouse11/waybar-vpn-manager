@@ -38,6 +38,8 @@ from .happ import (
     XRAY_BIN,
     _daemon_request,
     _daemon_running_processes,
+    _hold_session,
+    _invalidate_procs_cache,
     _open_session,
     _recv_frame,
     _routing_asset_dir,
@@ -511,22 +513,18 @@ def run_keeper(kind: str, server_id: str) -> None:
                 )
 
                 sock.settimeout(15)
-                exit_reason = "unknown"
-                while True:
-                    try:
-                        frame = _recv_frame(sock)
-                    except TimeoutError:
-                        if not _iface_exists(iface):
-                            exit_reason = f"iface {iface} gone"
-                            break
-                        continue
-                    if frame and frame.get("event") == "stopped":
-                        exit_reason = "happd sent stopped"
-                        break
+                exit_reason, died = _hold_session(
+                    sock,
+                    iface,
+                    process_id,
+                    owns_state=lambda: (_read_keeper_state(state_path) or {}).get("pid")
+                    == os.getpid(),
+                    iface_exists=lambda name: _iface_exists(name),
+                )
             finally:
                 sock.close()
             logutil.log(f"keys keeper: tunnel ended: {exit_reason}")
-            if exit_reason != f"iface {iface} gone":
+            if not died:
                 break
             if attempts >= max_attempts:
                 notify_failure(
@@ -620,7 +618,12 @@ class KeysProvider(VPNProvider):
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        deadline = time.time() + 25  # happd can be slow to ack
+        try:
+            return self._await_keeper(state_path, time.time() + 25)  # happd can be slow to ack
+        finally:
+            _invalidate_procs_cache()
+
+    def _await_keeper(self, state_path: Path, deadline: float) -> ActionResult:
         while time.time() < deadline:
             state = _read_keeper_state(state_path)
             if state:
@@ -638,6 +641,7 @@ class KeysProvider(VPNProvider):
         if process_id not in _daemon_running_processes(fresh=True):
             return
         _daemon_request("stop", **{"process-id": process_id})
+        _invalidate_procs_cache()
         deadline = time.time() + 5
         while time.time() < deadline:
             if not Path(f"/sys/class/net/{iface}").exists():
@@ -653,6 +657,7 @@ class KeysProvider(VPNProvider):
         if process_id not in _daemon_running_processes(fresh=True):
             return ActionResult(success=False, message=f"{self.name} is not connected")
         resp = _daemon_request("stop", **{"process-id": process_id})
+        _invalidate_procs_cache()
         if not resp or resp.get("status") not in ("stopping", "success"):
             error = resp.get("error", "no response") if resp else "happd unreachable"
             return ActionResult(success=False, message=f"Failed to stop: {error}")

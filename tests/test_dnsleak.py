@@ -1,3 +1,7 @@
+import urllib.error
+
+import pytest
+
 import dnsleak
 
 
@@ -28,29 +32,63 @@ def test_run_happy_path(monkeypatch):
     assert result["conclusion"] == "No DNS leaks found."
 
 
-def test_run_returns_none_on_empty_test_id(monkeypatch):
+def test_run_fails_at_step_1_on_empty_test_id(monkeypatch):
     monkeypatch.setattr(dnsleak, "_get_test_id", lambda: "")
 
     def boom(test_id):
         raise AssertionError("must not probe without a test id")
 
     monkeypatch.setattr(dnsleak, "_send_probes", boom)
-    assert dnsleak.run() is None
+    with pytest.raises(dnsleak.LeakTestError) as e:
+        dnsleak.run()
+    assert e.value.step == 1
 
 
-def test_run_returns_none_on_network_failure(monkeypatch):
+def test_run_failure_carries_step_and_reason(monkeypatch):
+    """A bare None used to become 'Test failed — no network?' with no clue
+    which call died or why (a slow exit timed out bash.ws's TLS handshake)."""
+
     def boom():
-        raise OSError("no route")
+        raise urllib.error.URLError(TimeoutError("_ssl.c:1064: The handshake operation timed out"))
 
     monkeypatch.setattr(dnsleak, "_get_test_id", boom)
-    assert dnsleak.run() is None
+    with pytest.raises(dnsleak.LeakTestError) as e:
+        dnsleak.run()
+    assert e.value.step == 1
+    assert "handshake operation timed out" in e.value.reason
+    assert "bash.ws" in str(e.value)
 
 
-def test_run_returns_none_on_malformed_results(monkeypatch):
+def test_run_failure_at_results_step(monkeypatch):
+    monkeypatch.setattr(dnsleak, "_get_test_id", lambda: "abc123")
+    monkeypatch.setattr(dnsleak, "_send_probes", lambda test_id: None)
+
+    def http_503(test_id):
+        raise urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
+
+    monkeypatch.setattr(dnsleak, "_fetch_results", http_503)
+    with pytest.raises(dnsleak.LeakTestError) as e:
+        dnsleak.run()
+    assert e.value.step == 3
+    assert e.value.reason == "HTTP 503"
+
+
+def test_run_fails_on_malformed_results(monkeypatch):
     monkeypatch.setattr(dnsleak, "_get_test_id", lambda: "abc123")
     monkeypatch.setattr(dnsleak, "_send_probes", lambda test_id: None)
     monkeypatch.setattr(dnsleak, "_fetch_results", lambda test_id: {"not": "a list"})
-    assert dnsleak.run() is None
+    with pytest.raises(dnsleak.LeakTestError) as e:
+        dnsleak.run()
+    assert e.value.step == 3
+
+
+def test_run_reports_each_step_before_running_it(monkeypatch):
+    monkeypatch.setattr(dnsleak, "_get_test_id", lambda: "abc123")
+    monkeypatch.setattr(dnsleak, "_send_probes", lambda test_id: None)
+    monkeypatch.setattr(dnsleak, "_fetch_results", lambda test_id: [])
+    steps = []
+    dnsleak.run(on_step=lambda n, label: steps.append(n))
+    assert steps == [1, 2, 3]
 
 
 def test_run_no_dns_servers_still_returns_ip_and_conclusion(monkeypatch):

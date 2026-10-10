@@ -771,6 +771,13 @@ def _speed_test_env(monkeypatch, *, measure, ks_on=False, active=(), urls=(), pi
     cfg = config.Config(speed_test_urls=list(urls))
     monkeypatch.setattr(vpn_manager.config, "load_config", lambda: cfg)
     monkeypatch.setattr(vpn_manager, "notify", lambda t, m, urgent=False: notes.append(m))
+
+    class NotesProgress(_FakeProgress):
+        def step(self, n, message):
+            super().step(n, message)
+            notes.append(f"{n}/{self.steps} · {message}" if self.steps else message)
+
+    monkeypatch.setattr(vpn_manager.notifyutil, "Progress", NotesProgress)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager.speedtest, "measure", measure)
     monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: ks_on)
@@ -953,6 +960,25 @@ def test_dns_leak_server_row_falls_back_to_asn_without_org():
     assert "AS13335 CloudFlare Inc" in row[0]
 
 
+class _FakeProgress:
+    """Records a tool's progress notification instead of calling notify-send."""
+
+    last = None
+
+    def __init__(self, title, steps=None):
+        self.title, self.steps, self.events = title, steps, []
+        _FakeProgress.last = self
+
+    def step(self, n, message):
+        self.events.append(("step", n, message))
+
+    def done(self, message):
+        self.events.append(("done", message))
+
+    def fail(self, message):
+        self.events.append(("fail", message))
+
+
 def _dns_leak_menu_env(
     monkeypatch, result, active=(), countries=None, ipv6_off=True, second_opinion=None
 ):
@@ -961,7 +987,8 @@ def _dns_leak_menu_env(
     monkeypatch.setattr(vpn_manager.ipinfo, "country_of_ip", lambda ip: second_opinion)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
-    monkeypatch.setattr(vpn_manager.dnsleak, "run", lambda: result)
+    monkeypatch.setattr(vpn_manager.dnsleak, "run", lambda on_step=None: result)
+    monkeypatch.setattr(vpn_manager.notifyutil, "Progress", _FakeProgress)
     monkeypatch.setattr(vpn_manager, "active_connections", lambda providers=None: list(active))
     monkeypatch.setattr(
         vpn_manager.reputation, "country_of", lambda name: (countries or {}).get(name)
@@ -1086,10 +1113,11 @@ def test_dns_leak_test_menu_builds_result_rows(monkeypatch):
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager, "active_connections", lambda providers=None: [])
     monkeypatch.setattr(vpn_manager.ipv6guard, "is_disabled", lambda: False)
+    monkeypatch.setattr(vpn_manager.notifyutil, "Progress", _FakeProgress)
     monkeypatch.setattr(
         vpn_manager.dnsleak,
         "run",
-        lambda: {
+        lambda on_step=None: {
             "ip": "1.2.3.4",
             "ip_country": "DE",
             "dns_servers": [
@@ -1118,10 +1146,17 @@ def test_dns_leak_test_menu_builds_result_rows(monkeypatch):
 
 
 def test_dns_leak_test_menu_handles_network_failure(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager.dnsleak, "run", lambda: None)
+    monkeypatch.setattr(vpn_manager.notifyutil, "Progress", _FakeProgress)
+
+    def no_network(on_step=None):
+        raise vpn_manager.dnsleak.LeakTestError(1, "[Errno 101] Network is unreachable")
+
+    monkeypatch.setattr(vpn_manager.dnsleak, "run", no_network)
     result = vpn_manager.dns_leak_test_menu()
     assert not result.success
+    kind, message = _FakeProgress.last.events[-1]
+    assert kind == "fail" and "Network is unreachable" in message
+    assert "slow" not in message  # the timeout hint is for timeouts only
 
 
 def test_ip_info_menu_builds_rows(monkeypatch):
@@ -1139,7 +1174,10 @@ def test_ip_info_menu_builds_rows(monkeypatch):
             mobile=False,
         ),
     ]
-    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda include_keyed=True: findings)
+    monkeypatch.setattr(vpn_manager.notifyutil, "Progress", _FakeProgress)
+    monkeypatch.setattr(
+        vpn_manager.reputation, "lookup_self", lambda include_keyed=True, on_step=None: findings
+    )
     seen = []
     monkeypatch.setattr(
         vpn_manager,
@@ -1160,7 +1198,10 @@ def test_ip_info_menu_builds_rows(monkeypatch):
 
 def test_ip_info_menu_handles_no_findings(monkeypatch):
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lambda include_keyed=True: [])
+    monkeypatch.setattr(vpn_manager.notifyutil, "Progress", _FakeProgress)
+    monkeypatch.setattr(
+        vpn_manager.reputation, "lookup_self", lambda include_keyed=True, on_step=None: []
+    )
     result = vpn_manager.ip_info_menu()
     assert not result.success
 
@@ -1584,3 +1625,80 @@ def test_dns_leak_exit_row_still_leaks_when_second_opinion_disagrees_too(monkeyp
         )
         vpn_manager.dns_leak_test_menu()
         assert "Leaked: exit ≠ 🇵🇱 Польша 1 🇵🇱" in seen[0], second
+
+
+
+def test_dns_leak_menu_shows_each_step_then_done(monkeypatch):
+    def run(on_step=None):
+        for n, label in enumerate(vpn_manager.dnsleak.STEPS, 1):
+            on_step(n, label)
+        return _leak_result([])
+
+    seen = _dns_leak_menu_env(monkeypatch, None, active=[_wg("de1")])
+    monkeypatch.setattr(vpn_manager.dnsleak, "run", run)
+    vpn_manager.dns_leak_test_menu()
+    events = _FakeProgress.last.events
+    assert [e[1] for e in events if e[0] == "step"] == [1, 2, 3]
+    assert events[-1][0] == "done"
+    assert seen  # the results window still opens
+
+
+def test_dns_leak_menu_failure_names_the_step_and_reason(monkeypatch):
+    def run(on_step=None):
+        on_step(1, vpn_manager.dnsleak.STEPS[0])
+        raise vpn_manager.dnsleak.LeakTestError(1, "The handshake operation timed out")
+
+    seen = _dns_leak_menu_env(monkeypatch, None, active=[_wg("de1")])
+    monkeypatch.setattr(vpn_manager.dnsleak, "run", run)
+    result = vpn_manager.dns_leak_test_menu()
+    kind, message = _FakeProgress.last.events[-1]
+    assert kind == "fail"
+    assert "1/3" in message and "handshake operation timed out" in message
+    assert "slow" in message  # timeout hint: a slow or blocking exit, not "no network"
+    assert not result.success and result.message == ""  # notified once, not twice
+    assert seen == []  # no empty results window
+
+
+
+def test_speed_test_all_failed_ends_progress_with_the_reason(monkeypatch):
+    _speed_test_env(monkeypatch, measure=lambda url, d: _err("URLError: timed out"))
+    vpn_manager._run_speed_tests([("A", "http://a"), ("B", "http://b")])
+    kind, message = _FakeProgress.last.events[-1]
+    assert kind == "fail" and "URLError: timed out" in message
+
+
+def test_speed_test_success_ends_progress_with_done(monkeypatch):
+    _speed_test_env(monkeypatch, measure=lambda url, d: _ok(9.0))
+    vpn_manager._run_speed_tests([("A", "http://a")])
+    assert _FakeProgress.last.events[-1][0] == "done"
+
+
+def _ip_info_env(monkeypatch, lookup):
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(vpn_manager.notifyutil, "Progress", _FakeProgress)
+    monkeypatch.setattr(vpn_manager.reputation, "lookup_self", lookup)
+    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": None)
+
+
+def test_ip_info_failure_says_the_own_ip_could_not_be_detected(monkeypatch):
+    def lookup(include_keyed=True, on_step=None):
+        on_step(1, "detecting your public IP")
+        return []
+
+    _ip_info_env(monkeypatch, lookup)
+    result = vpn_manager.ip_info_menu()
+    kind, message = _FakeProgress.last.events[-1]
+    assert kind == "fail" and "public IP" in message
+    assert not result.success and result.message == ""
+
+
+def test_ip_info_failure_says_no_source_answered(monkeypatch):
+    def lookup(include_keyed=True, on_step=None):
+        on_step(1, "detecting your public IP")
+        on_step(2, "asking 2 IP sources")
+        return []
+
+    _ip_info_env(monkeypatch, lookup)
+    vpn_manager.ip_info_menu()
+    kind, message = _FakeProgress.last.events[-1]
+    assert kind == "fail" and "no IP source answered" in message

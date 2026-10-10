@@ -126,7 +126,7 @@ def lookup_host(host: str, include_keyed: bool) -> list[IPFinding]:
     return list(result)
 
 
-def lookup_self(include_keyed: bool = True) -> list[IPFinding]:
+def lookup_self(include_keyed: bool = True, on_step=None) -> list[IPFinding]:
     """On-demand 'IP Info': detect the caller's own public IP once, then
     every enabled source (keyed included by default) against that one
     address — every source is asked about the SAME IP, rather than each
@@ -137,13 +137,17 @@ def lookup_self(include_keyed: bool = True) -> list[IPFinding]:
     never add up to more than ~LOOKUP_TIMEOUT of total wall-clock time
     (_detect_own_ip()'s own timeout chain, run before this guard starts,
     is a separate, smaller, already-bounded cost)."""
+    report = on_step or (lambda n, label: None)
+    report(1, "detecting your public IP")
     ip = _detect_own_ip()
     if not ip:
         return []
+    sources = _enabled_sources(include_keyed)
+    report(2, f"asking {len(sources)} IP sources")
     findings: list[IPFinding] = []
 
     def _work() -> None:
-        for source in _enabled_sources(include_keyed):
+        for source in sources:
             try:
                 finding = source.lookup(ip)
             except Exception:  # noqa: BLE001 - one bad source must not break the others

@@ -10,7 +10,6 @@ notification servers (mako, dunst) render <b>/<a>/&entities; in the body,
 so "<b>DE</b> & co" would otherwise render bold or as a broken entity.
 """
 
-import contextlib
 import html
 import re
 import subprocess
@@ -37,11 +36,82 @@ def clean_body(text: str) -> str:
     return html.escape(text[:BODY_MAXLEN], quote=False)
 
 
-def send(title: str, message: str, urgent: bool = False) -> None:
-    cmd = ["notify-send"]
+def send(
+    title: str,
+    message: str,
+    urgent: bool = False,
+    replace_id: int | None = None,
+    expire_ms: int | None = None,
+    want_id: bool = False,
+) -> int | None:
+    """Show a notification. With want_id (Progress only), ask notify-send
+    for its id (-p) and update `replace_id` in place (-r); returns the id,
+    or None if there's none to be had.
+
+    Plain notifications never pass -p: a notify-send without -p/-r exits on
+    the unknown option and shows nothing, which must not take down every
+    menu and keeper notification. For want_id calls that fail that way,
+    retry without -p/-r — progress then arrives as separate bubbles."""
+    flags = []
     if urgent:
-        cmd += ["-u", "critical"]
-    cmd += ["--", clean_title(title), clean_body(message)]
+        flags += ["-u", "critical"]
+    if expire_ms is not None:
+        flags += ["-t", str(expire_ms)]
+    text = ["--", clean_title(title), clean_body(message)]
+    id_flags = []
+    if want_id:
+        id_flags = ["-p"] + (["-r", str(replace_id)] if replace_id is not None else [])
+    result = _run(["notify-send", *id_flags, *flags, *text])
+    if want_id and result is not None and result.returncode != 0:
+        _run(["notify-send", *flags, *text])
+        return None
+    if not want_id or result is None:
+        return None
+    try:
+        return int((getattr(result, "stdout", "") or "").strip())
+    except ValueError:
+        return None
+
+
+def _run(cmd: list[str]):
     # a detached keeper has no one to report a missing notify-send to
-    with contextlib.suppress(OSError):
-        subprocess.run(cmd, capture_output=True)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        return None
+
+
+DONE_EXPIRE_MS = 3000  # a finished tool's last word; its results window takes over
+
+
+class Progress:
+    """One notification per long-running tool, replaced step by step — the
+    walker window can't redraw while a tool runs, so this is the spinner.
+    Steps stay up until replaced (-t 0); done() expires, fail() is critical
+    and carries the reason."""
+
+    def __init__(self, title: str, steps: int | None = None):
+        self.title, self.steps = title, steps
+        self._id: int | None = None
+
+    def step(self, n: int, message: str) -> None:
+        prefix = f"{n}/{self.steps} · " if self.steps else ""
+        self._show(prefix + message, expire_ms=0)
+
+    def done(self, message: str) -> None:
+        self._show(message, expire_ms=DONE_EXPIRE_MS)
+
+    def fail(self, message: str) -> None:
+        self._show(message, urgent=True)
+
+    def _show(self, message: str, urgent: bool = False, expire_ms: int | None = None) -> None:
+        nid = send(
+            self.title,
+            message,
+            urgent=urgent,
+            replace_id=self._id,
+            expire_ms=expire_ms,
+            want_id=True,
+        )
+        if nid is not None:
+            self._id = nid

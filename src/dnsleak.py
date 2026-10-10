@@ -18,12 +18,38 @@ import contextlib
 import json
 import re
 import socket
+import urllib.error
 import urllib.request
 
 API = "bash.ws"
 PROBE_COUNT = 30
 PROBE_TIMEOUT = 5  # seconds, bounds the whole probe wave regardless of stragglers
 REQUEST_TIMEOUT = 8  # seconds, per HTTP call
+
+STEPS = (
+    f"requesting a test id from {API}",
+    f"sending {PROBE_COUNT} DNS probes",
+    f"fetching results from {API}",
+)
+
+
+class LeakTestError(Exception):
+    """The test died at `step` (1-based index into STEPS) for `reason`."""
+
+    def __init__(self, step: int, reason: str):
+        self.step, self.reason = step, reason
+        super().__init__(f"failed at {step}/{len(STEPS)} ({STEPS[step - 1]}): {reason}")
+
+
+def _describe(e: Exception) -> str:
+    """Short human reason: 'HTTP 503', 'The handshake operation timed out'."""
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {e.code}"
+    if isinstance(e, urllib.error.URLError):
+        reason = e.reason
+        text = str(reason) if not isinstance(reason, str) else reason
+        return text.split(": ", 1)[-1] if text.startswith("_ssl.c") else text
+    return str(e) or type(e).__name__
 
 # Public anycast resolvers — their egress can sit in any country near the
 # tunnel exit, so answering from one of these is never a leak on its own.
@@ -84,25 +110,36 @@ def server_tags(server: dict, ip_country: str, ip_asn: int | None) -> list[str]:
     return tags
 
 
-def run() -> dict | None:
+def run(on_step=None) -> dict:
     """{'ip', 'ip_country': 'DE'|'', 'ip_asn': 24940|None, 'dns_servers':
     [{'ip', 'country', 'country_name', 'asn', 'org'}], 'conclusion'} for a
-    fresh test, or None
-    on any network failure. ip_country is the 2-letter code bash.ws reports
-    for the detected public IP itself (present in its "ip"-type entry, same
-    shape as the "dns" entries) — kept separate from the bare ip string so
-    the UI layer can render a flag without re-parsing the raw entry."""
+    fresh test. ip_country is the 2-letter code bash.ws reports for the
+    detected public IP itself (present in its "ip"-type entry, same shape as
+    the "dns" entries) — kept separate from the bare ip string so the UI
+    layer can render a flag without re-parsing the raw entry.
+
+    on_step(n, label) is called before each of STEPS (progress). Raises
+    LeakTestError(step, reason) instead of returning nothing: "Test failed
+    — no network?" with no step or cause was undiagnosable (a slow exit
+    timing out bash.ws's TLS handshake looked like no network at all)."""
+    report = on_step or (lambda n, label: None)
+    report(1, STEPS[0])
     try:
         test_id = _get_test_id()
-        if not test_id:
-            return None
-        _send_probes(test_id)
+    except (OSError, ValueError) as e:
+        raise LeakTestError(1, _describe(e)) from e
+    if not test_id:
+        raise LeakTestError(1, f"{API} returned no test id")
+    report(2, STEPS[1])
+    _send_probes(test_id)  # failed lookups are fine — only the attempt matters
+    report(3, STEPS[2])
+    try:
         entries = _fetch_results(test_id)
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as e:
+        raise LeakTestError(3, _describe(e)) from e
 
     if not isinstance(entries, list):
-        return None
+        raise LeakTestError(3, f"unexpected response from {API}")
     ip_entry = next((e for e in entries if e.get("type") == "ip"), None)
     dns_servers = [e for e in entries if e.get("type") == "dns"]
     conclusion = next((e.get("ip") for e in entries if e.get("type") == "conclusion"), "")

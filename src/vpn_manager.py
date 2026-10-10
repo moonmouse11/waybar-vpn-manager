@@ -418,15 +418,27 @@ def _dns_leak_verdict_row(result: dict) -> str | None:
     return "DNS via VPN or public resolvers"
 
 
+def _timeout_hint(reason: str) -> str:
+    """A timeout through a tunnel is rarely "no network" — usually the exit
+    is slow or the target is blocked from it (seen: TLS handshakes of 6-8 s
+    on one exit, bash.ws unreachable)."""
+    if "timed out" in reason.lower():
+        return " — the VPN exit may be slow or blocking it; try another server"
+    return ""
+
+
 def dns_leak_test_menu() -> ActionResult:
     """DNS leak test — same backend (bash.ws) as dnsleaktest.com. Runs
     synchronously (a few seconds of DNS probes) and shows the result as a
     submenu rather than a single notification, so a long DNS-server list
     stays readable instead of getting truncated in a notify-send bubble."""
-    notify("DNS Leak Test", "Test started, this takes a few seconds…")
-    result = dnsleak.run()
-    if result is None:
-        return ActionResult(False, "Test failed — no network?")
+    progress = notifyutil.Progress("DNS Leak Test", steps=len(dnsleak.STEPS))
+    try:
+        result = dnsleak.run(on_step=lambda n, label: progress.step(n, f"{label}…"))
+    except dnsleak.LeakTestError as e:
+        progress.fail(f"Test {e}{_timeout_hint(e.reason)}")
+        return ActionResult(False, "")  # already notified, with the reason
+    progress.done("Done")
 
     active = active_connections()
     ip_country, ip_asn = result["ip_country"], result.get("ip_asn")
@@ -461,10 +473,22 @@ def ip_info_menu() -> ActionResult:
     source (free ones on by default; keyed ones once their API key is
     set). A single ad-hoc lookup for the current public IP, not the
     background reputation sweep."""
-    notify("IP Info", "Test started, this takes a few seconds…")
-    findings = reputation.lookup_self(include_keyed=True)
+    progress = notifyutil.Progress("IP Info", steps=2)
+    reached: list[int] = []
+
+    def on_step(n: int, label: str) -> None:
+        reached.append(n)
+        progress.step(n, f"{label}…")
+
+    findings = reputation.lookup_self(include_keyed=True, on_step=on_step)
     if not findings:
-        return ActionResult(False, "Could not get IP info — no network?")
+        if 2 not in reached:
+            reason = "could not detect your public IP (ipwho.is, ifconfig.me)"
+        else:
+            reason = f"no IP source answered within {reputation.LOOKUP_TIMEOUT:.0f} s"
+        progress.fail(f"Failed: {reason}")
+        return ActionResult(False, "")  # already notified, with the reason
+    progress.done("Done")
 
     items: list[tuple[str, callable]] = [(f"IP: {findings[0].ip}", lambda: ActionResult(True, ""))]
     for finding in findings:
@@ -534,12 +558,14 @@ def _speed_test_custom_url() -> ActionResult:
 def _run_speed_tests(
     targets: list[tuple[str, str]], duration: float = speedtest.DURATION
 ) -> ActionResult:
-    """Measure each target in turn (progress via notify — the walker window
-    can't update while a test runs), then show every result in one window."""
+    """Measure each target in turn (progress in one notification replaced
+    step by step — the walker window can't update while a test runs), then
+    show every result in one window."""
+    steps = len(targets) if len(targets) > 1 else None
+    progress = notifyutil.Progress(SPEED_TEST_TITLE, steps=steps)
     results = []
     for i, (name, url) in enumerate(targets, 1):
-        step = f"{i}/{len(targets)} · " if len(targets) > 1 else ""
-        notify(SPEED_TEST_TITLE, f"{step}{name}: measuring for ~{duration:.0f} s…")
+        progress.step(i, f"{name}: measuring for ~{duration:.0f} s…")
         results.append((name, speedtest.measure(url, duration)))
 
     noop = lambda: ActionResult(True, "")  # noqa: E731 — info rows do nothing
@@ -549,6 +575,11 @@ def _run_speed_tests(
         *((_speed_test_result_row(name, m), noop) for name, m in results),
     ]
     ok = [(name, m.mbps) for name, m in results if m.mbps is not None]
+    if ok:
+        progress.done(f"Done — {len(ok)}/{len(results)} measured")
+    else:
+        first = next(m.error for _name, m in results if m.error)
+        progress.fail(f"All {len(results)} failed — {first}{_timeout_hint(first)}")
     if len(results) > 1 and ok:
         best = max(ok, key=lambda r: r[1])
         items.append((f"🏆 Fastest: {best[0]} ({best[1]:.1f} Mbit/s)", noop))

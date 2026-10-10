@@ -276,8 +276,11 @@ def _server(name):
     }
 
 
-def _patch_env(monkeypatch, tmp_path, servers, interfaces, processes, last, keeper_status):
-    """Stub happmeta so no network/files are touched."""
+def _patch_env(
+    monkeypatch, tmp_path, servers, interfaces, processes, last, keeper_status, gui=True
+):
+    """Stub happmeta so no network/files are touched. gui: whether the Happ
+    GUI is running (the only case its lastServerName may name a tunnel)."""
     import happmeta
 
     monkeypatch.setattr(happmeta, "all_servers", lambda *a, **k: servers)
@@ -288,6 +291,7 @@ def _patch_env(monkeypatch, tmp_path, servers, interfaces, processes, last, keep
     monkeypatch.setattr(happ, "_happ_interfaces", lambda: interfaces)
     monkeypatch.setattr(happ, "_daemon_running_processes", lambda fresh=False: processes)
     monkeypatch.setattr(happ, "_last_server_name", lambda: last)
+    monkeypatch.setattr(happ, "_gui_running", lambda: gui)
     state = tmp_path / "keeper.json"
     if keeper_status is not None:
         state.write_text(json.dumps(keeper_status))
@@ -607,3 +611,145 @@ def test_run_keeper_builds_config_with_the_configured_dns_mode(tmp_path, monkeyp
     happ.run_keeper("S")
 
     assert seen["tunnel_dns"] is tunnel
+
+
+# Real frames from happd 4.5.2 for a process stopped by request (captured
+# 2026-10-10 with a probe process): no "stopped" event any more — "error"
+# ("Process crashed", even for a requested stop) then "finished" with the
+# exit status, 15 = SIGTERM.
+_STOP_FRAMES_452 = _frame(
+    {"data": "Process crashed", "event": "error", "process-id": "xray-core"}
+) + _frame({"data": "15", "event": "finished", "process-id": "xray-core"})
+
+
+def _starts(socks):
+    return [s for s in socks if b'"action": "start"' in s.sent]
+
+
+def test_keeper_exits_on_happd_452_finished_after_a_requested_stop(tmp_path, monkeypatch):
+    """happd 4.5.2 never sends "stopped": keepers of switched-away servers
+    waited forever (4 alive at once, 'two connections' in the menu)."""
+    socks = []
+
+    def factory():
+        socks.append(FakeSock(
+            _frame({"request-id": "wm-12345", "status": "started"}) + _STOP_FRAMES_452,
+            raise_timeout=True,
+        ))
+        return socks[-1]
+
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+    writes = _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg)
+    monkeypatch.setattr(happ, "_iface_exists", lambda name: True)
+
+    happ.run_keeper("S")
+
+    assert len(_starts(socks)) == 1  # a requested stop is never fought
+    assert writes[-1]["status"] == "exited"
+
+
+def test_keeper_rearms_when_xray_finishes_on_its_own(tmp_path, monkeypatch):
+    socks = []
+
+    def factory():
+        crash = _frame({"data": "2", "event": "finished", "process-id": "xray-core"})
+        first = not socks
+        socks.append(FakeSock(
+            _frame({"request-id": "wm-12345", "status": "started"}) + (crash if first else b""),
+        ))
+        return socks[-1]
+
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+    _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg)
+    monkeypatch.setattr(happ, "_iface_exists", lambda name: True)
+
+    happ.run_keeper("S")
+
+    assert len(_starts(socks)) == 2  # unexpected exit -> re-armed once
+
+
+def test_keeper_exits_once_another_keeper_owns_the_state(tmp_path, monkeypatch):
+    """A switch starts the new xray under the same process id and TUN name:
+    happd ignores the replaced process's exit, so the old keeper gets no
+    event and happ-xray never disappears. Ownership is the only signal."""
+    sock = FakeSock(_frame({"request-id": "wm-12345", "status": "started"}), raise_timeout=True)
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+    _run_keeper_env(tmp_path, monkeypatch, sock, cfg)  # iface always exists
+    notes = []
+    monkeypatch.setattr(happ, "notify_failure", lambda title, message: notes.append(message))
+    real_recv = happ._recv_frame
+
+    def recv(s):
+        frame = real_recv(s)  # the ack; after it every recv times out
+        (tmp_path / "keeper.json").write_text(json.dumps({"status": "connecting", "pid": 424242}))
+        return frame
+
+    monkeypatch.setattr(happ, "_recv_frame", recv)
+
+    happ.run_keeper("S")  # must return instead of looping forever
+
+    assert len(_starts([sock])) == 1
+    assert notes == []
+
+
+
+def test_connections_never_borrow_the_guis_last_server_for_a_tunnel_we_dont_own(
+    tmp_path, monkeypatch
+):
+    """Right after a disconnect the (3 s-cached) process list still showed
+    xray-core while our keeper state was already gone: the tunnel was named
+    after Happ.conf's lastServerName (the GUI's last pick, Unlock's
+    "Германия+"), so Waybar showed it connected and the menu's "↻" row
+    reconnected *that* server. Only a running GUI may name a tunnel."""
+    servers = [
+        {"name": "🇩🇪 Германия+", "provider_id": "u", "provider_name": "Unlock", "config": {}},
+        {"name": "🇵🇱 Польша 1", "provider_id": "a", "provider_name": "ARTΞMIDA", "config": {}},
+    ]
+    _patch_env(
+        monkeypatch, tmp_path, servers, [], ["xray-core"], "🇩🇪 Германия+", None, gui=False
+    )
+    conns = happ.HappProvider().connections()
+    active = [c for c in conns if c.active]
+    assert [(c.name, c.subscription_id) for c in active] == [("Happ", None)]
+
+
+def test_connections_gui_started_tunnel_still_named_after_its_last_server(tmp_path, monkeypatch):
+    servers = [{"name": "🇩🇪 Германия+", "provider_id": "u", "provider_name": "U", "config": {}}]
+    _patch_env(monkeypatch, tmp_path, servers, ["happ-xray"], ["xray-core"], "🇩🇪 Германия+", None)
+    conns = happ.HappProvider().connections()
+    assert [c.name for c in conns if c.active] == ["🇩🇪 Германия+"]
+
+
+@pytest.mark.parametrize("action", ["disconnect", "_stop_running"])
+def test_process_list_cache_is_dropped_when_we_change_happd_state(tmp_path, monkeypatch, action):
+    """The --status tick's 3 s process-list cache must not outlive a change
+    we made ourselves — a stale "xray-core running" is what named the
+    phantom connection above."""
+    cache = tmp_path / "procs.json"
+    cache.write_text(json.dumps({"at": 9e18, "procs": ["xray-core"]}))
+    monkeypatch.setattr(happ, "PROCS_CACHE", cache)
+    monkeypatch.setattr(happ, "KEEPER_STATE", tmp_path / "keeper.json")
+    monkeypatch.setattr(happ, "_daemon_running_processes", lambda fresh=False: ["xray-core"])
+    monkeypatch.setattr(happ, "_daemon_request", lambda action, **kw: {"status": "stopping"})
+    monkeypatch.setattr(happ, "_happ_interfaces", lambda: [])
+    provider = happ.HappProvider()
+    if action == "disconnect":
+        provider.disconnect(happ.VPNConnection(name="x", provider="Happ", active=True))
+    else:
+        provider._stop_running()
+    assert not cache.exists()
+
+
+def test_headless_connect_drops_the_process_list_cache(tmp_path, monkeypatch):
+    cache = tmp_path / "procs.json"
+    cache.write_text(json.dumps({"at": 9e18, "procs": []}))
+    monkeypatch.setattr(happ, "PROCS_CACHE", cache)
+    state = tmp_path / "keeper.json"
+    monkeypatch.setattr(happ, "KEEPER_STATE", state)
+
+    def spawn(cmd, **kw):
+        state.write_text(json.dumps({"status": "connected", "server": "S"}))
+
+    monkeypatch.setattr(happ.subprocess, "Popen", spawn)
+    assert happ.HappProvider()._headless_connect("S").success
+    assert not cache.exists()
