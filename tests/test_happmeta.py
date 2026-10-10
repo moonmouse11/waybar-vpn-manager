@@ -242,7 +242,8 @@ def test_build_runtime_config_tunnels_dns_out_through_proxy():
     }
     cfg = happmeta.build_runtime_config(server_cfg)
     dns_out = next(o for o in cfg["outbounds"] if o["tag"] == "dns-out")
-    assert dns_out["proxySettings"] == {"tag": "proxy", "transportLayer": True}
+    assert dns_out["streamSettings"]["sockopt"]["dialerProxy"] == "proxy"
+    assert "proxySettings" not in dns_out  # removed in xray 26.x: refuses to start
 
     # a subscription that already ships its own dns outbound must also be
     # chained, not left leaking
@@ -255,7 +256,8 @@ def test_build_runtime_config_tunnels_dns_out_through_proxy():
     }
     cfg2 = happmeta.build_runtime_config(server_cfg2)
     dns_out2 = next(o for o in cfg2["outbounds"] if o["tag"] == "dns-out")
-    assert dns_out2["proxySettings"] == {"tag": "proxy", "transportLayer": True}
+    assert dns_out2["streamSettings"]["sockopt"]["dialerProxy"] == "proxy"
+    assert "proxySettings" not in dns_out2  # removed in xray 26.x: refuses to start
 
 
 def test_all_servers_groups_by_provider(tmp_path, monkeypatch):
@@ -930,7 +932,8 @@ def test_build_runtime_config_chains_dns_out_through_existing_proxy_tag():
     # at nothing; use the first real proxy outbound instead
     cfg = happmeta.build_runtime_config(_HYSTERIA_BALANCER)
     dns_out = next(o for o in cfg["outbounds"] if o["tag"] == "dns-out")
-    assert dns_out["proxySettings"] == {"tag": "DE-1", "transportLayer": True}
+    assert dns_out["streamSettings"]["sockopt"]["dialerProxy"] == "DE-1"
+    assert "proxySettings" not in dns_out  # removed in xray 26.x: refuses to start
 
 
 def test_subscription_targets_from_provider_urls(tmp_path, monkeypatch):

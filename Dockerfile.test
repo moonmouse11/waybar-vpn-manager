@@ -2,7 +2,7 @@
 #
 # The source tree is bind-mounted read-only at run time (not baked in via
 # COPY), so local edits are picked up without a rebuild — only rebuild
-# when pyproject.toml's dev deps change.
+# when pyproject.toml's dev deps or the xray versions below change.
 #
 # Deliberately run with no host mounts beyond the repo itself and no
 # network: the plugin under test talks to real system state (happd's
@@ -19,5 +19,34 @@ WORKDIR /repo
 # from this file alone, without the rest of the tree (which is
 # bind-mounted at run time, not baked in).
 RUN pip install --no-cache-dir "pytest>=8" "pytest-cov>=5" "ruff>=0.6"
+
+# Upstream xray releases for tests/test_xray_compat.py: every generated
+# config must load on each. Happ bundles upstream xray unmodified (4.5.2
+# ships 26.9.9, byte-identical), and an xray release that rejects our
+# config makes headless connect fail — 26.9.x dropped outbound
+# "proxySettings". Pinned: latest stable, the one Happ currently ships,
+# newest pre-release (early warning before Happ picks it up). Checksums
+# are the releases' own Xray-linux-64.zip.dgst SHA2-256 values. Fetched at
+# build time only — the test run itself stays offline.
+# (Downloaded inside RUN rather than `ADD --checksum`: BuildKit's ADD
+# stalled for 20+ minutes on these GitHub release URLs.)
+ARG XRAY_URL=https://github.com/XTLS/Xray-core/releases/download
+ARG XRAY_RELEASES="\
+26.3.27:23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae \
+26.9.9:1eb9175d0f0a8f8149c9230a7fc5ae66ce332ed20a53155ce61fe62e3f58b7df \
+26.9.30:f851110beaff16e78d643f0ccfd9524b4a44dfd59bae3e34bb52bba378f7690e"
+# one binary per version; geoip/geosite (~28 MB) kept once, shared by all
+RUN set -e; mkdir -p /tmp/xray; for r in $XRAY_RELEASES; do \
+        v=${r%%:*}; sum=${r#*:}; z=/tmp/xray/$v.zip; \
+        python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
+            "$XRAY_URL/v$v/Xray-linux-64.zip" "$z"; \
+        echo "$sum  $z" | sha256sum -c -; \
+        python -m zipfile -e "$z" "/tmp/xray/$v"; \
+        install -D -m 0755 "/tmp/xray/$v/xray" "/opt/xray/$v/xray"; \
+        last=$v; \
+    done; \
+    install -D -m 0644 -t /opt/xray/assets "/tmp/xray/$last/geoip.dat" "/tmp/xray/$last/geosite.dat"; \
+    rm -rf /tmp/xray
+ENV XRAY_COMPAT_DIR=/opt/xray
 
 CMD ["sh", "-c", "ruff check --no-cache src tests && pytest -p no:cacheprovider"]

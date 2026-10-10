@@ -1,0 +1,75 @@
+name: xray compatibility
+
+# Every xray config the plugin generates must load on real upstream xray —
+# Happ bundles it unmodified, and a release that rejects our config breaks
+# headless connect (26.9.x dropped outbound "proxySettings"). See
+# tests/test_xray_compat.py.
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  # Weekly early warning: the newest upstream release (pre-releases
+  # included) usually reaches Happ weeks later.
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned:
+    # The versions pinned (with checksums) in Dockerfile.test — the same
+    # image `make test-docker` uses, so CI and local runs can't drift.
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Build test image
+      run: docker build -t waybar-vpn-manager-test -f Dockerfile.test .
+
+    - name: Run xray compatibility tests (offline)
+      run: >
+        docker run --rm --network none -v "$PWD":/repo:ro -w /repo waybar-vpn-manager-test
+        pytest -p no:cacheprovider -rs tests/test_xray_compat.py
+
+  latest:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Setup Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      with:
+        python-version: "3.13"
+        cache: pip
+        cache-dependency-path: pyproject.toml
+
+    - name: Install dependencies
+      run: pip install -e ".[dev]"
+
+    - name: Fetch newest xray release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        tag=$(gh release list -R XTLS/Xray-core --exclude-drafts -L 1 --json tagName -q '.[0].tagName')
+        echo "Testing against xray $tag"
+        dl="$RUNNER_TEMP/dl"
+        mkdir -p "$dl"
+        gh release download "$tag" -R XTLS/Xray-core -D "$dl" \
+          -p Xray-linux-64.zip -p Xray-linux-64.zip.dgst
+        # verify against the release's own SHA2-256 digest
+        want=$(awk -F'= ' '/^SHA2-256/ {print $2}' "$dl/Xray-linux-64.zip.dgst")
+        echo "$want  $dl/Xray-linux-64.zip" | sha256sum -c -
+        python -m zipfile -e "$dl/Xray-linux-64.zip" "$dl/x"
+        dir="$RUNNER_TEMP/xray"
+        install -D -m 0755 "$dl/x/xray" "$dir/${tag#v}/xray"
+        install -D -m 0644 -t "$dir/assets" "$dl/x/geoip.dat" "$dl/x/geosite.dat"
+        echo "XRAY_COMPAT_DIR=$dir" >> "$GITHUB_ENV"
+
+    - name: Run xray compatibility tests
+      run: pytest -rs tests/test_xray_compat.py

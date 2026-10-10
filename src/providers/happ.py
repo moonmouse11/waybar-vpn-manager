@@ -215,6 +215,59 @@ def _routing_asset_dir() -> Path | None:
     return None
 
 
+XRAY_TEST_TIMEOUT = 10  # seconds; a real check takes ~40 ms
+XRAY_ERROR_PREFIX = "main: failed to load config files: [stdin:] > "
+XRAY_ERROR_MAXLEN = 240  # readable in a notification bubble
+
+
+def xray_config_error(cfg: dict, asset_dir: Path | None) -> str | None:
+    """xray's own reason for rejecting `cfg`, or None if it loads.
+
+    happd acks "started" as soon as it spawns xray — before xray has even
+    parsed its config — so a config the bundled xray no longer accepts
+    (Happ 4.5.2's xray 26.x dropped outbound "proxySettings") used to look
+    like a successful connect with no tunnel. `xray run -test` reads the
+    config from stdin (keys never touch disk) and needs no root. A check
+    that can't run at all (missing binary, hang) returns None: that is not
+    a config error, and happd will report it on start."""
+    env = {**os.environ}
+    if asset_dir:
+        env["XRAY_LOCATION_ASSET"] = str(asset_dir)
+    try:
+        result = subprocess.run(
+            [str(XRAY_BIN), "run", "-test", "-c", "stdin:"],
+            input=json.dumps(cfg),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=XRAY_TEST_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 0:
+        return None
+    lines = (result.stdout + result.stderr).strip().splitlines()
+    reason = lines[-1] if lines else ""
+    if XRAY_ERROR_PREFIX not in reason:
+        # failed only after the config loaded: older xray (26.3.x) `-test`
+        # also creates the server, i.e. opens the TUN device, which fails
+        # unprivileged — the config itself is fine, happd (root) will cope
+        logutil.log(f"xray -test failed after loading the config (ignored): {reason}")
+        return None
+    reason = reason.removeprefix("Failed to start: ").removeprefix(XRAY_ERROR_PREFIX)
+    return reason[:XRAY_ERROR_MAXLEN]
+
+
+def notify_failure(title: str, message: str) -> None:
+    """Critical desktop notification from a detached keeper — by the time a
+    running tunnel dies the menu that started it is long gone, so nothing
+    else would ever tell the user. ("--": message can be xray/happd text.)"""
+    with contextlib.suppress(OSError):
+        subprocess.run(
+            ["notify-send", "-u", "critical", "--", title, message], capture_output=True
+        )
+
+
 def _tun_interface_name(xray_config: dict) -> str | None:
     for inbound in xray_config.get("inbounds", []):
         if inbound.get("protocol") == "tun":
@@ -323,6 +376,11 @@ def run_keeper(server_name: str | None = None, provider_id: str | None = None) -
             return
 
         iface = _tun_interface_name(cfg)
+        if reason := xray_config_error(cfg, _routing_asset_dir()):
+            logutil.log(f"keeper: xray rejected the config: {reason}")
+            state.update(status="error", message=f"xray rejected the config: {reason}")
+            _write_own_keeper_state(state)
+            return
 
         # happd occasionally kills the managed xray without telling us (observed
         # after ~1-9 min, no journal trace). Re-arm the start a few times on an
@@ -395,7 +453,14 @@ def run_keeper(server_name: str | None = None, provider_id: str | None = None) -
             finally:
                 sock.close()
             logutil.log(f"keeper: tunnel ended: {exit_reason}")
-            if exit_reason != f"iface {iface} gone" or attempts >= max_attempts:
+            if exit_reason != f"iface {iface} gone":
+                break
+            if attempts >= max_attempts:
+                notify_failure(
+                    "Happ — tunnel lost",
+                    f"{state.get('server') or 'Happ'}: xray kept dying, gave up after "
+                    f"{attempts} attempts — see vpn-manager.log / journalctl -u happd",
+                )
                 break
             logutil.log(f"keeper: xray died unexpectedly, re-arming in {backoff:.0f}s")
             time.sleep(backoff)
