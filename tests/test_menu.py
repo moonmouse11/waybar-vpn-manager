@@ -335,7 +335,7 @@ def test_level1_active_count_label(monkeypatch):
     vpn_manager.run_menu()
     level1_options = seen_prompts[0][1]
     assert "WireGuard  (1/2)" in level1_options
-    assert "🛠 Tools" in level1_options
+    assert "🛠️ Tools" in level1_options
 
 
 def test_killswitch_all_mode_arms_wg(monkeypatch, tmp_path):
@@ -541,7 +541,7 @@ def test_level1_layout_connected(monkeypatch):
     assert options[0].startswith("↻ WireGuard: nl")
     assert options[1] == "     ↓ 2.0 MiB/s ↑ 512.0 KiB/s · 1.2.3.4 🇩🇪"  # metrics row
     assert "Disconnect: WireGuard: nl" in options
-    assert options[-1] == "🛠 Tools"
+    assert options[-1] == "🛠️ Tools"
 
 
 def test_connect_disconnects_other_tunnels(monkeypatch):
@@ -625,7 +625,7 @@ def test_level1_disconnect_all_label_for_multiple(monkeypatch):
     vpn_manager.run_menu()
     options = seen[0]
     assert "Disconnect ALL  (2)" in options
-    assert options[-1] == "🛠 Tools"
+    assert options[-1] == "🛠️ Tools"
 
 
 def test_level1_no_disconnect_row_when_idle(monkeypatch):
@@ -641,7 +641,7 @@ def test_level1_no_disconnect_row_when_idle(monkeypatch):
     options = seen[0]
     assert not any(o.startswith("Disconnect") for o in options)
     assert not any(o.startswith("▶") for o in options)
-    assert options[-1] == "🛠 Tools"
+    assert options[-1] == "🛠️ Tools"
 
 
 def test_menu_loop_shows_named_keys_row_when_empty(monkeypatch):
@@ -674,7 +674,7 @@ def test_menu_loop_shows_named_keys_row_when_empty(monkeypatch):
     )
     vpn_manager.menu_loop()
     assert any(o.startswith("VLESS") for o in seen[0])
-    assert seen[0][-1] == "🛠 Tools"  # Tools always last
+    assert seen[0][-1] == "🛠️ Tools"  # Tools always last
     assert imported == ["VLESS"]
 
 
@@ -698,7 +698,7 @@ def test_menu_loop_hides_empty_keys_by_default(monkeypatch):
     )
     vpn_manager.menu_loop()
     assert not any(o.startswith("VLESS") for o in seen[0])
-    assert seen[0][-1] == "🛠 Tools"
+    assert seen[0][-1] == "🛠️ Tools"
 
 
 def test_menu_loop_always_shows_tools_row(monkeypatch):
@@ -712,10 +712,10 @@ def test_menu_loop_always_shows_tools_row(monkeypatch):
         lambda options, prompt="VPN": (seen.append(list(options)) or None),
     )
     vpn_manager.menu_loop()
-    assert "🛠 Tools" in seen[0]
+    assert "🛠️ Tools" in seen[0]
     assert "🔍 DNS Leak Test" not in seen[0]
     assert "ℹ️ IP Info" not in seen[0]
-    assert not any(str(row).strip().startswith("Killswitch") for row in seen[0])
+    assert not any("Killswitch:" in str(row) for row in seen[0])
 
 
 def test_tools_menu_lists_every_visible_tool(monkeypatch):
@@ -736,11 +736,11 @@ def test_tools_menu_lists_every_visible_tool(monkeypatch):
         "ℹ️ IP Info",
         "⚡ Speed Test",
         "🔄 Refresh All",
-        "🗑 Clear Caches",
-        "⚙ Settings",
+        "🗑️ Clear Caches",
+        "⚙️ Settings",
     ):
         assert label in rows
-    assert any(str(row).strip().startswith("Killswitch") for row in rows)
+    assert any(row.startswith(f"{vpn_manager.KILLSWITCH_ICON} Killswitch:") for row in rows)
     assert rows[-1] == "‹ Back"
 
 
@@ -1191,7 +1191,7 @@ def test_ip_info_menu_builds_rows(monkeypatch):
     assert "ipwho.is: Germany · jogcorp" in rows
     assert "ip-api.com: France · SMARTNET Germany GmbH" in rows
     assert "🏢 Datacenter/Hosting: Yes" in rows
-    assert "🕵 Proxy/VPN detected: No" in rows
+    assert "🕵️ Proxy/VPN detected: No" in rows
     assert "📱 Mobile network: No" in rows
     assert rows[-1] == "‹ Back"
 

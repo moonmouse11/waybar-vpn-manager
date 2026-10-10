@@ -50,9 +50,11 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
 - **Pluggable IP sources** — multi-source exit-IP/reputation lookups (free
   sources on by default; keyed sources like AbuseIPDB/IPQualityScore once an
   API key is configured), managed from the same `~/.config/vpn-manager/config.json`
-- **Interactive setup wizard** — `--configure` (or the in-menu ⚙ Settings action)
-  walks through providers, tools and IP sources; runs automatically as the last
-  step of `make install`
+- **Settings** — 🛠 Tools → ⚙ Settings opens a small floating terminal with
+  every option and its current value: ↑/↓ to move, Space to change it in place,
+  `s` to save, `q` to quit (`vpn_manager.py --settings` runs it in any terminal). The terminal wizard
+  (`--configure`) asks the same questions one by one and runs as the last step
+  of `make install`
 
 ## Requirements
 
@@ -143,7 +145,7 @@ provider appear automatically.
 }
 ```
 
-Run the interactive wizard (`--configure`, or ⚙ Settings in the 🛠 Tools menu) instead of
+Use ⚙ Settings in the 🛠 Tools menu (or the terminal wizard, `--configure`) instead of
 hand-editing `ip_sources`/`tools_visible`/`dns_mode` if you'd rather be walked through it.
 
 `dns_mode: "tunnel"` (the default) costs a subscription's split DNS: `.ru` names
@@ -177,6 +179,7 @@ Happ connect --> --happ-keeper (long-lived happd session owning xray)
 
 src/
   vpn_manager.py      entry point: status, menu, Tools submenu, configure wizard
+  settings_tui.py     ⚙ Settings list (curses, in a floating terminal)
   config.py           user config load/save (providers, tools_visible, ip_sources, dns_mode, …)
   notifyutil.py       notify-send wrapper: text sanitising, in-place progress
   fsutil.py           atomic 0600 JSON writes for state/cache/config
