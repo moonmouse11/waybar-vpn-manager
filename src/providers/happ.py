@@ -43,6 +43,7 @@ import config
 import fsutil
 import happmeta
 import logutil
+import notifyutil
 
 from .base import ActionResult, VPNConnection, VPNProvider
 
@@ -261,11 +262,9 @@ def xray_config_error(cfg: dict, asset_dir: Path | None) -> str | None:
 def notify_failure(title: str, message: str) -> None:
     """Critical desktop notification from a detached keeper — by the time a
     running tunnel dies the menu that started it is long gone, so nothing
-    else would ever tell the user. ("--": message can be xray/happd text.)"""
-    with contextlib.suppress(OSError):
-        subprocess.run(
-            ["notify-send", "-u", "critical", "--", title, message], capture_output=True
-        )
+    else would ever tell the user. Text is cleaned by notifyutil: it carries
+    server names from subscriptions/keys and xray/happd output."""
+    notifyutil.send(title, message, urgent=True)
 
 
 def _tun_interface_name(xray_config: dict) -> str | None:
