@@ -1,5 +1,7 @@
 import json
 import struct
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -91,6 +93,8 @@ def _run_keeper_env(tmp_path, monkeypatch, sock, cfg):
     monkeypatch.setattr(happmeta, "resolve_config", lambda name, **kw: cfg)
     monkeypatch.setattr(happ, "_open_session", lambda: sock)
     monkeypatch.setattr(happ, "_routing_asset_dir", lambda: None)
+    monkeypatch.setattr(happ, "xray_config_error", lambda cfg, asset_dir: None)
+    monkeypatch.setattr(happ, "notify_failure", lambda title, message: None)
     monkeypatch.setattr(happ, "_iface_exists", lambda name: True)
     monkeypatch.setattr(happ, "time", _FrozenTime)
     return writes
@@ -113,6 +117,8 @@ def _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg):
     monkeypatch.setattr(happmeta, "resolve_config", lambda name, **kw: cfg)
     monkeypatch.setattr(happ, "_open_session", factory)
     monkeypatch.setattr(happ, "_routing_asset_dir", lambda: None)
+    monkeypatch.setattr(happ, "xray_config_error", lambda cfg, asset_dir: None)
+    monkeypatch.setattr(happ, "notify_failure", lambda title, message: None)
     monkeypatch.setattr(happ, "_iface_exists", lambda name: False)
     monkeypatch.setattr(happ, "time", _FrozenTime)
     return writes
@@ -490,3 +496,96 @@ def test_headless_connect_passes_provider_on_command_line(tmp_path, monkeypatch)
     monkeypatch.setattr(happ.subprocess, "Popen", fake_popen)
     assert happ.HappProvider()._headless_connect("S", "2").success
     assert spawned[0][-3:] == ["--happ-keeper", "S", "2"]
+
+
+class _XrayRun:
+    def __init__(self, returncode=0, output="Configuration OK.", exc=None):
+        self.returncode, self.output, self.exc = returncode, output, exc
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append((cmd, kw))
+        if self.exc:
+            raise self.exc
+        return subprocess.CompletedProcess(cmd, self.returncode, self.output, "")
+
+
+def test_xray_config_error_reports_xray_reason_without_generic_prefix(monkeypatch):
+    run = _XrayRun(
+        23,
+        "Xray 26.9.9\nFailed to start: main: failed to load config files: [stdin:] > "
+        "infra/conf: failed to build outbound config with tag dns-out > "
+        'common/errors: The feature outbound "proxySettings" has been removed',
+    )
+    monkeypatch.setattr(happ.subprocess, "run", run)
+    err = happ.xray_config_error({"outbounds": []}, Path("/assets"))
+    assert err.startswith("infra/conf: failed to build outbound config with tag dns-out")
+    assert "proxySettings" in err
+    cmd, kw = run.calls[0]
+    assert cmd == [str(happ.XRAY_BIN), "run", "-test", "-c", "stdin:"]
+    assert json.loads(kw["input"]) == {"outbounds": []}  # config never touches disk
+    assert kw["env"]["XRAY_LOCATION_ASSET"] == "/assets"
+
+
+def test_xray_config_error_none_when_config_ok(monkeypatch):
+    monkeypatch.setattr(happ.subprocess, "run", _XrayRun())
+    assert happ.xray_config_error({}, None) is None
+
+
+@pytest.mark.parametrize(
+    "exc", [FileNotFoundError("xray"), subprocess.TimeoutExpired("xray", 10)]
+)
+def test_xray_config_error_never_blocks_connect_when_check_itself_fails(monkeypatch, exc):
+    # a missing/hung xray is happd's problem to report, not a config error
+    monkeypatch.setattr(happ.subprocess, "run", _XrayRun(exc=exc))
+    assert happ.xray_config_error({}, None) is None
+
+
+def test_xray_config_error_ignores_failures_after_the_config_loaded(monkeypatch):
+    # older xray (26.3.x) `-test` also instantiates the server, i.e. opens the
+    # TUN device — unprivileged that fails although the config parsed fine;
+    # blocking connect on it would reject every valid config
+    run = _XrayRun(23, "Failed to start: main: failed to create server > operation not permitted")
+    monkeypatch.setattr(happ.subprocess, "run", run)
+    assert happ.xray_config_error({}, None) is None
+
+
+def test_run_keeper_rejected_config_is_an_error_and_never_started(tmp_path, monkeypatch):
+    sock = FakeSock(_frame({"request-id": "wm-12345", "status": "started"}))
+    writes = _run_keeper_env(tmp_path, monkeypatch, sock, {"remarks": "S", "inbounds": []})
+    monkeypatch.setattr(happ, "xray_config_error", lambda cfg, asset_dir: "bad field")
+
+    happ.run_keeper("S")
+
+    error = next(w for w in writes if w["status"] == "error")
+    assert "bad field" in error["message"]  # shown by the menu as a critical notification
+    assert b'"action": "start"' not in sock.sent
+
+
+def test_keeper_notifies_when_tunnel_lost_after_rearms(tmp_path, monkeypatch):
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+
+    def factory():
+        return FakeSock(_frame({"request-id": "wm-12345", "status": "started"}), raise_timeout=True)
+
+    _run_keeper_env_factory(tmp_path, monkeypatch, factory, cfg)
+    notes = []
+    monkeypatch.setattr(happ, "notify_failure", lambda title, message: notes.append(message))
+
+    happ.run_keeper("S")
+
+    assert len(notes) == 1 and "S" in notes[0]
+
+
+def test_keeper_does_not_notify_on_user_disconnect(tmp_path, monkeypatch):
+    sock = FakeSock(
+        _frame({"request-id": "wm-12345", "status": "started"}) + _frame({"event": "stopped"})
+    )
+    cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
+    _run_keeper_env(tmp_path, monkeypatch, sock, cfg)
+    notes = []
+    monkeypatch.setattr(happ, "notify_failure", lambda title, message: notes.append(message))
+
+    happ.run_keeper("S")
+
+    assert notes == []

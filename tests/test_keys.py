@@ -265,3 +265,20 @@ def test_import_config_surfaces_parser_reason(store, tmp_path):
     result = keys.KeysProvider("ss").import_config(str(key_file))
     assert not result.success
     assert "plugin" in result.message
+
+
+def test_keeper_rejected_config_is_an_error_and_never_started(tmp_path, monkeypatch):
+    server = {"name": "K", "kind": "vless"}
+    monkeypatch.setattr(keys, "KEEPER_STATE_DIR", tmp_path)
+    monkeypatch.setattr(keys, "_load_servers", lambda: [server])
+    monkeypatch.setattr(keys, "_server_id", lambda s: "id1")
+    monkeypatch.setattr(keys, "_build_xray_config", lambda s: {"outbounds": []})
+    monkeypatch.setattr(keys, "_routing_asset_dir", lambda: None)
+    monkeypatch.setattr(keys, "xray_config_error", lambda cfg, asset_dir: "bad field")
+    monkeypatch.setattr(keys, "_open_session", lambda: pytest.fail("must not start xray"))
+
+    keys.run_keeper("vless", "id1")
+
+    final = json.loads((tmp_path / "keys-keeper-vless.json").read_text())
+    assert final["status"] == "exited"  # after the error state the menu already reported
+    assert "bad field" in final["message"]

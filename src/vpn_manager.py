@@ -25,6 +25,7 @@ import ipsources
 import ipv6guard
 import killswitch
 import logutil
+import notifyutil
 import reputation
 import speedtest
 from providers import ALL_PROVIDERS
@@ -1138,14 +1139,9 @@ def _collect_ping_targets() -> list[tuple[str, str, int]]:
 
 
 def notify(title: str, message: str, urgent: bool = False):
-    cmd = ["notify-send"]
-    if urgent:
-        cmd += ["-u", "critical"]
-    # "--" stops option parsing: title/message can come from a VPN daemon's
-    # own error text or a subscription provider's server name, and either
-    # could start with "-" and otherwise be read as a notify-send flag.
-    cmd += ["--", title, message]
-    subprocess.run(cmd, capture_output=True)
+    # title/message can carry a VPN daemon's own error text or a
+    # subscription provider's server name — notifyutil cleans both
+    notifyutil.send(title, message, urgent=urgent)
 
 
 def refresh_waybar():
