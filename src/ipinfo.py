@@ -93,6 +93,24 @@ def update(connection: str) -> None:
         fsutil.write_json_atomic(CACHE_PATH, entry)
 
 
+def country_of_ip(ip: str) -> str | None:
+    """ipwho.is's country for `ip` — a second geo opinion when another
+    source's disagrees (leased IP blocks geolocate all over the place: one
+    exit was KR / PL / FR across three DBs). The cache if it holds this IP,
+    else one live lookup of the current exit. None if that answers with a
+    different IP (not an opinion on ours) or the lookup fails."""
+    cache = read_cache()
+    if cache and cache.get("ip") == ip and cache.get("country_code"):
+        return cache["country_code"].upper()
+    try:
+        data = _fetch()
+    except (OSError, ValueError):
+        return None
+    if data.get("ip") != ip or not data.get("country_code"):
+        return None
+    return data["country_code"].upper()
+
+
 def _fetch() -> dict:
     try:
         with urllib.request.urlopen(API_PRIMARY, timeout=6) as resp:

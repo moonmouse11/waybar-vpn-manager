@@ -367,7 +367,9 @@ def run_keeper(server_name: str | None = None, provider_id: str | None = None) -
     _write_keeper_state(state)
     try:
         cfg = happmeta.resolve_config(
-            server_name or (_last_server_name() or ""), provider_id=provider_id
+            server_name or (_last_server_name() or ""),
+            provider_id=provider_id,
+            tunnel_dns=config.load_config().dns_mode == "tunnel",
         )
         if cfg is None:
             state.update(status="error", message="no config for this server")

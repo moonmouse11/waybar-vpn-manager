@@ -953,8 +953,12 @@ def test_dns_leak_server_row_falls_back_to_asn_without_org():
     assert "AS13335 CloudFlare Inc" in row[0]
 
 
-def _dns_leak_menu_env(monkeypatch, result, active=(), countries=None, ipv6_off=True):
-    """Wire dns_leak_test_menu()'s collaborators; returns the captured rows list."""
+def _dns_leak_menu_env(
+    monkeypatch, result, active=(), countries=None, ipv6_off=True, second_opinion=None
+):
+    """Wire dns_leak_test_menu()'s collaborators; returns the captured rows list.
+    second_opinion: what ipwho.is says about the exit IP's country."""
+    monkeypatch.setattr(vpn_manager.ipinfo, "country_of_ip", lambda ip: second_opinion)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager.dnsleak, "run", lambda: result)
@@ -1553,3 +1557,30 @@ def test_dns_leak_exit_row_eu_flag_accepts_any_member_state(monkeypatch):
         )
         vpn_manager.dns_leak_test_menu()
         assert row in seen[0], exit_cc
+
+
+
+def test_dns_leak_exit_row_second_geo_opinion_clears_a_geo_db_mismatch(monkeypatch):
+    """Poland 1: bash.ws geolocated its exit 192.144.78.10 (leased IPbnb
+    block) to KR, ipwho.is to PL/Warsaw, ip-api to FR — while the resolvers
+    were Cloudflare's Polish PoP. One geo DB's opinion isn't a leak."""
+    seen = _dns_leak_menu_env(
+        monkeypatch,
+        _leak_result([], ip_country="KR"),
+        active=[_wg("🇵🇱 Польша 1")],
+        second_opinion="PL",
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert "Exit matches 🇵🇱 Польша 1 🇵🇱 · bash.ws: 🇰🇷" in seen[0]
+
+
+def test_dns_leak_exit_row_still_leaks_when_second_opinion_disagrees_too(monkeypatch):
+    for second in ("KR", None):
+        seen = _dns_leak_menu_env(
+            monkeypatch,
+            _leak_result([], ip_country="KR"),
+            active=[_wg("🇵🇱 Польша 1")],
+            second_opinion=second,
+        )
+        vpn_manager.dns_leak_test_menu()
+        assert "Leaked: exit ≠ 🇵🇱 Польша 1 🇵🇱" in seen[0], second

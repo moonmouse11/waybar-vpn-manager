@@ -960,11 +960,12 @@ def test_app_dns_is_never_routed_direct():
     """xray's resolver used to go dns-in -> dns-direct: every app lookup
     (tun:53 -> dns-out -> built-in DNS) left via the real NIC from the real
     IP — DNS leak test showed a Russian Cloudflare node behind a DE exit.
-    dns-in must fall through to the same rules as app traffic (tunnel or
-    balancer); only the bootstrap tag may go direct."""
+    dns-in must follow app traffic (tunnel or balancer); only the bootstrap
+    tag may go direct."""
     cfg = happmeta.build_runtime_config(_HYSTERIA_BALANCER)
     assert cfg["dns"]["tag"] == "dns-in"
-    assert not any("dns-in" in (r.get("inboundTag") or []) for r in cfg["routing"]["rules"])
+    dns_in = [r for r in cfg["routing"]["rules"] if "dns-in" in (r.get("inboundTag") or [])]
+    assert dns_in == [{"inboundTag": ["dns-in"], "balancerTag": "auto"}]
     assert all(r["inboundTag"] == [happmeta.DNS_BOOTSTRAP_TAG] for r in _dns_rules(cfg))
 
 
@@ -1015,3 +1016,83 @@ def test_bootstrap_resolver_skips_domain_restricted_and_hostname_resolvers():
 def test_bootstrap_resolver_falls_back_when_subscription_has_none():
     boot = happmeta.build_runtime_config(_HYSTERIA_BALANCER)["dns"]["servers"][0]
     assert boot["address"] == happmeta.DNS_BOOTSTRAP_FALLBACK
+
+
+# ARTΞMIDA's real shape: its own resolvers pinned direct by a subscription rule
+_SUB_DNS_DIRECT = {
+    "remarks": "🇩🇪 Германия 1",
+    "outbounds": [
+        {"protocol": "vless", "tag": "proxy",
+         "settings": {"vnext": [{"address": "203.0.113.5", "port": 443}]}},
+        {"protocol": "vless", "tag": "bs",
+         "settings": {"vnext": [{"address": "203.0.113.6", "port": 443}]}},
+        {"protocol": "freedom", "tag": "direct"},
+    ],
+    "dns": {"servers": ["1.1.1.1", "1.0.0.1"]},
+    "routing": {
+        "balancers": [{"tag": "AUTO", "selector": ["proxy"], "fallbackTag": "bs"}],
+        "rules": [
+            {"ip": ["1.1.1.1", "1.0.0.1"], "ruleTag": "DNS_DIRECT", "outboundTag": "direct"},
+            {"domain": ["regexp:[.]ru$"], "outboundTag": "direct"},
+            {"type": "field", "network": "tcp,udp", "balancerTag": "AUTO"},
+        ],
+    },
+}
+
+
+def _dns_in_rules(cfg):
+    return [r for r in cfg["routing"]["rules"] if r.get("inboundTag") == ["dns-in"]]
+
+
+def test_tunnel_dns_overrides_subscription_rules_that_send_dns_direct():
+    """Germany 1 (ARTΞMIDA) leaked: its DNS_DIRECT rule sent xray's lookups
+    to 1.1.1.1 straight out the real NIC (DNS leak test: Cloudflare RU +
+    the ISP's MSK-IX resolver). In tunnel mode dns-in gets its own rule,
+    ahead of every subscription rule, to the subscription's own catch-all."""
+    cfg = happmeta.build_runtime_config(_SUB_DNS_DIRECT)
+    (rule,) = _dns_in_rules(cfg)
+    assert rule == {"inboundTag": ["dns-in"], "balancerTag": "AUTO"}
+    rules = cfg["routing"]["rules"]
+    first_sub = next(i for i, r in enumerate(rules) if r.get("ruleTag") == "DNS_DIRECT")
+    assert rules.index(rule) < first_sub
+
+
+def test_subscription_dns_mode_keeps_the_providers_dns_routing():
+    cfg = happmeta.build_runtime_config(_SUB_DNS_DIRECT, tunnel_dns=False)
+    assert _dns_in_rules(cfg) == []
+
+
+def test_tunnel_dns_target_without_subscription_catch_all_is_our_proxy_catch_all():
+    cfg = happmeta.build_runtime_config(
+        {"remarks": "x", "outbounds": [{"protocol": "vless", "tag": "proxy"}]}
+    )
+    assert _dns_in_rules(cfg) == [{"inboundTag": ["dns-in"], "outboundTag": "proxy"}]
+
+
+def test_tunnel_dns_never_targets_a_direct_catch_all():
+    # a whitelist-style subscription whose default route is direct must not
+    # take DNS along — tunnel it through the first real proxy instead
+    server_cfg = {
+        "remarks": "wl",
+        "outbounds": [
+            {"protocol": "vless", "tag": "wl-a"},
+            {"protocol": "freedom", "tag": "direct"},
+        ],
+        "routing": {"rules": [{"network": "tcp,udp", "outboundTag": "direct"}]},
+    }
+    cfg = happmeta.build_runtime_config(server_cfg)
+    assert _dns_in_rules(cfg) == [{"inboundTag": ["dns-in"], "outboundTag": "wl-a"}]
+
+
+def test_tunnel_dns_ignores_inbound_restricted_rules_as_catch_all():
+    # {"inboundTag": ["socks","http"], ...} never matches dns-in (or tun-in)
+    server_cfg = {
+        "remarks": "lb",
+        "outbounds": [{"protocol": "vless", "tag": "candidate"}],
+        "routing": {
+            "balancers": [{"tag": "ENTRY", "selector": ["candidate"]}],
+            "rules": [{"inboundTag": ["socks", "http"], "balancerTag": "ENTRY"}],
+        },
+    }
+    cfg = happmeta.build_runtime_config(server_cfg)
+    assert _dns_in_rules(cfg) == [{"inboundTag": ["dns-in"], "outboundTag": "proxy"}]

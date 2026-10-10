@@ -589,3 +589,21 @@ def test_keeper_does_not_notify_on_user_disconnect(tmp_path, monkeypatch):
     happ.run_keeper("S")
 
     assert notes == []
+
+
+@pytest.mark.parametrize("mode, tunnel", [("tunnel", True), ("subscription", False)])
+def test_run_keeper_builds_config_with_the_configured_dns_mode(tmp_path, monkeypatch, mode, tunnel):
+    import config
+    import happmeta
+
+    seen = {}
+    sock = FakeSock(_frame({"request-id": "wm-12345", "status": "started"}))
+    _run_keeper_env(tmp_path, monkeypatch, sock, {"remarks": "S", "inbounds": []})
+    monkeypatch.setattr(
+        happmeta, "resolve_config", lambda name, **kw: seen.update(kw) or {"remarks": "S"}
+    )
+    monkeypatch.setattr(happ.config, "load_config", lambda: config.Config(dns_mode=mode))
+
+    happ.run_keeper("S")
+
+    assert seen["tunnel_dns"] is tunnel
