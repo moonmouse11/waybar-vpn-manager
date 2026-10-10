@@ -291,6 +291,9 @@ def run(win, state: SettingsState) -> bool:
         height = win.getmaxyx()[0]
         visible = max(1, height - 3)
         top = min(max(top, state.cursor - visible + 1), state.cursor)
+        rows = state.rows()
+        while top > 0 and not rows[top - 1].selectable and state.cursor - top + 1 < visible:
+            top -= 1  # scrolling up: show the section header above the cursor too
         _draw(win, state, top)
         ch = win.get_wch()
         key = ord(ch) if isinstance(ch, str) and len(ch) == 1 else ch
