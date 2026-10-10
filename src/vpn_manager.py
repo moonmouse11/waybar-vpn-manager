@@ -11,6 +11,7 @@ import contextlib
 import getpass
 import json
 import re
+import shutil
 import subprocess
 import sys
 from abc import ABC, abstractmethod
@@ -28,6 +29,7 @@ import killswitch
 import logutil
 import notifyutil
 import reputation
+import settings_tui
 import speedtest
 from providers import ALL_PROVIDERS
 from providers.base import (
@@ -319,10 +321,19 @@ def _killswitch_toggle(on: bool) -> ActionResult:
     return killswitch.set_mode(True, extra_ips=ips, ifaces=ifaces)
 
 
+KILLSWITCH_ICON = settings_tui.KILLSWITCH_ICON
+
+
 def _killswitch_item() -> tuple[str, callable]:
     if killswitch.is_enabled() or killswitch.mode() in ("happ", "all"):
-        return ("  Killswitch: ON — click to disable", lambda: _killswitch_toggle(False))
-    return ("  Killswitch: OFF — click to enable (all)", lambda: _killswitch_toggle(True))
+        return (
+            f"{KILLSWITCH_ICON} Killswitch: ON — click to disable",
+            lambda: _killswitch_toggle(False),
+        )
+    return (
+        f"{KILLSWITCH_ICON} Killswitch: OFF — click to enable (all)",
+        lambda: _killswitch_toggle(True),
+    )
 
 
 def _dns_leak_server_row(
@@ -498,7 +509,7 @@ def ip_info_menu() -> ActionResult:
         label = f"{finding.source}: {' · '.join(parts)}" if parts else finding.source
         items.append((label, lambda: ActionResult(True, "")))
     items.append(_ip_info_flag_row("🏢 Datacenter/Hosting", any(f.hosting for f in findings)))
-    items.append(_ip_info_flag_row("🕵 Proxy/VPN detected", any(f.proxy for f in findings)))
+    items.append(_ip_info_flag_row("🕵️ Proxy/VPN detected", any(f.proxy for f in findings)))
     items.append(_ip_info_flag_row("📱 Mobile network", any(f.mobile for f in findings)))
     items.append((BACK_LABEL, tools_menu))
     run_items(_unique_labels(items), prompt="IP Info")
@@ -507,7 +518,7 @@ def ip_info_menu() -> ActionResult:
 
 SPEED_TEST_TITLE = "Speed Test"  # walker prompt + progress notification title
 SPEED_TEST_ALL_LABEL = "🌍 All services"
-SPEED_TEST_CUSTOM_LABEL = "✏ Custom URL…"
+SPEED_TEST_CUSTOM_LABEL = "✏️ Custom URL…"
 SPEED_TEST_MAX_URLS = 5  # remembered custom URLs, newest first
 # per service in "All services" — run one after another (in parallel they'd
 # split the same uplink and each report a fraction of it), so this keeps
@@ -675,19 +686,10 @@ class TerminalPrompter(Prompter):
             return ""
 
 
-class WalkerPrompter(Prompter):
-    def confirm(self, question: str, default: bool) -> bool:
-        selected = walker_select(["Yes", "No"], prompt=question)
-        return (selected == "Yes") if selected else default
-
-    def text(self, question: str) -> str:
-        return walker_input(question) or ""
-
-
 def run_configure_wizard(prompter: Prompter) -> bool:
-    """The provider/tool/source walk shared by --configure (TerminalPrompter,
-    install.sh's last step) and ⚙ Settings (WalkerPrompter, in-menu — no
-    reinstall needed). Never touches an existing config.json unless the
+    """The question-by-question walk behind --configure (install.sh's last
+    step, in a terminal). The in-menu ⚙️ Settings is a list instead
+    (settings_tui.py). Never touches an existing config.json unless the
     user opts in via the first confirm. Returns False when the user
     declines reconfigure on an existing file; True after save."""
     if config.CONFIG_PATH.exists():
@@ -730,11 +732,48 @@ def run_configure_wizard(prompter: Prompter) -> bool:
     return True
 
 
+# ── ⚙ Settings: a list in a small floating terminal (settings_tui.py) — walker
+# can't change a row in place or keep the cursor where it was.
+
+SETTINGS_WINDOW_CLASS = "TUI.float"  # omarchy floats + centres this class (875×600)
+
+
+def _settings_tool_keys() -> list[tuple[str, str]]:
+    # ⚙ Settings can't hide itself from there: that would lock the user out
+    # of the window (--configure or config.json still can)
+    return [(key, label) for key, label, _fn in TOOLS if key != "settings"] + [
+        ("killswitch", f"{KILLSWITCH_ICON} Killswitch")
+    ]
+
+
 def settings_menu() -> ActionResult:
-    if run_configure_wizard(WalkerPrompter()):
-        return ActionResult(True, "Settings saved")
-    # Declined reconfigure — not a failure; run_items() maps success=False to urgent errors.
-    return ActionResult(True, "Settings unchanged")
+    cmd = [
+        "xdg-terminal-exec",
+        f"--app-id={SETTINGS_WINDOW_CLASS}",
+        "--title=VPN Settings",
+        "-e",
+        sys.executable,
+        str(Path(__file__)),
+        "--settings",
+    ]
+    if shutil.which("uwsm-app"):  # omarchy launches apps as their own systemd scope
+        cmd = ["uwsm-app", "--", *cmd]
+    try:
+        subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+        )
+    except OSError:
+        return ActionResult(
+            False, "No terminal launcher (xdg-terminal-exec) — run vpn_manager.py --settings"
+        )
+    return ActionResult(True, "")
+
+
+def run_settings_window() -> None:
+    """--settings, inside the terminal settings_menu() opened."""
+    if settings_tui.main([p.name for p in ALL_PROVIDERS], _settings_tool_keys()):
+        notify("VPN", "Settings saved")
+        refresh_waybar()
 
 
 # single source of truth for both tools_menu()'s rows and the configure
@@ -746,8 +785,8 @@ TOOLS = [
     ("ip_info", "ℹ️ IP Info", ip_info_menu),
     ("speed_test", "⚡ Speed Test", speed_test_menu),
     ("refresh_all", "🔄 Refresh All", refresh_all_menu),
-    ("clear_caches", "🗑 Clear Caches", clear_caches_menu),
-    ("settings", "⚙ Settings", settings_menu),
+    ("clear_caches", "🗑️ Clear Caches", clear_caches_menu),
+    ("settings", "⚙️ Settings", settings_menu),
 ]
 
 
@@ -833,7 +872,7 @@ def menu_loop() -> ActionResult:
         else:
             items.append((f"Disconnect ALL  ({len(all_active)})", disconnect_all))
 
-    items.append(("🛠 Tools", tools_menu))
+    items.append(("🛠️ Tools", tools_menu))
     return run_items(items, prompt="VPN")
 
 
@@ -1127,6 +1166,24 @@ WALKER_TIMEOUT = 120  # seconds — a wedged walker service must not hang the me
 # clashes with GOption parsing ("DONT USE SHORTHAND").
 WALKER_WIDTH = 900
 WALKER_MAXWIDTH = 860  # content area, a bit narrower than the box for padding
+# The theme's list propagates its natural size: the window grew whenever a
+# wider row scrolled into view and shrank with every row filtered out. Equal
+# min/max content sizes pin it — one big fixed window for every menu.
+WALKER_LIST_HEIGHT = 560  # ~14 rows; the box adds the search field + padding
+WALKER_SIZE_FLAGS = [
+    "--width",
+    str(WALKER_WIDTH),
+    "--minwidth",
+    str(WALKER_MAXWIDTH),
+    "--maxwidth",
+    str(WALKER_MAXWIDTH),
+]
+WALKER_LIST_FLAGS = [
+    "--minheight",
+    str(WALKER_LIST_HEIGHT),
+    "--maxheight",
+    str(WALKER_LIST_HEIGHT),
+]
 
 
 def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
@@ -1137,10 +1194,8 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
                 "-d",
                 "-p",
                 prompt,
-                "--width",
-                str(WALKER_WIDTH),
-                "--maxwidth",
-                str(WALKER_MAXWIDTH),
+                *WALKER_SIZE_FLAGS,
+                *WALKER_LIST_FLAGS,
             ],
             input="\n".join(options),
             capture_output=True,
@@ -1182,10 +1237,7 @@ def walker_input(prompt: str) -> str | None:
                 "-I",
                 "-p",
                 prompt,
-                "--width",
-                str(WALKER_WIDTH),
-                "--maxwidth",
-                str(WALKER_MAXWIDTH),
+                *WALKER_SIZE_FLAGS,
             ],
             capture_output=True,
             text=True,
@@ -1281,6 +1333,11 @@ def main():
         help="Refresh server IP-reputation cache in the background (internal)",
     )
     group.add_argument(
+        "--settings",
+        action="store_true",
+        help="Settings list in this terminal (what 🛠 Tools → ⚙ Settings opens)",
+    )
+    group.add_argument(
         "--configure",
         action="store_true",
         help="Interactive setup wizard: providers, tools, IP sources/keys",
@@ -1312,6 +1369,8 @@ def main():
         from providers.keys import run_keeper as run_keys_keeper
 
         run_keys_keeper(*args.keys_keeper)
+    elif args.settings:
+        run_settings_window()
     elif args.configure:
         run_configure_wizard(TerminalPrompter())
 

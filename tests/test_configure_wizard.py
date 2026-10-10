@@ -75,20 +75,6 @@ def test_terminal_prompter_text_returns_empty_on_eof_and_interrupt(monkeypatch):
     assert vpn_manager.TerminalPrompter().text("Key?") == ""
 
 
-def test_walker_prompter_confirm_maps_selection(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": "Yes")
-    assert vpn_manager.WalkerPrompter().confirm("Q?", default=False) is True
-    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": "No")
-    assert vpn_manager.WalkerPrompter().confirm("Q?", default=True) is False
-    monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": None)
-    assert vpn_manager.WalkerPrompter().confirm("Q?", default=True) is True  # escaped -> default
-
-
-def test_walker_prompter_text_delegates_to_walker_input(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "walker_input", lambda prompt: "example.com")
-    assert vpn_manager.WalkerPrompter().text("Domain?") == "example.com"
-
-
 def test_run_configure_wizard_writes_config_from_scratch(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [])  # keep the answer sequence short
@@ -134,25 +120,6 @@ def test_run_configure_wizard_collects_api_keys(tmp_path, monkeypatch):
 
     loaded = config.load_config()
     assert loaded.ip_sources["abuseipdb"]["api_key"] == "secret-key-123"
-
-
-def test_settings_menu_runs_wizard_with_walker_prompter(monkeypatch):
-    called = {}
-    monkeypatch.setattr(
-        vpn_manager,
-        "run_configure_wizard",
-        lambda prompter: called.update(kind=type(prompter)) or True,
-    )
-    result = vpn_manager.settings_menu()
-    assert result.success
-    assert called["kind"] is vpn_manager.WalkerPrompter
-
-
-def test_settings_menu_reports_no_op_when_wizard_declined(monkeypatch):
-    monkeypatch.setattr(vpn_manager, "run_configure_wizard", lambda prompter: False)
-    result = vpn_manager.settings_menu()
-    assert result.success is True
-    assert "unchanged" in result.message
 
 
 def test_run_configure_wizard_asks_dns_mode_last(tmp_path, monkeypatch):
