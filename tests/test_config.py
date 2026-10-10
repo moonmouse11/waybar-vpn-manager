@@ -106,3 +106,17 @@ def test_speed_test_urls_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
     save_config(Config(speed_test_urls=["http://10.0.0.5/f.bin", "https://x/y"]))
     assert load_config().speed_test_urls == ["http://10.0.0.5/f.bin", "https://x/y"]
+
+
+def test_dns_mode_defaults_to_tunnel_and_roundtrips(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    assert load_config().dns_mode == "tunnel"  # leak-proof unless asked otherwise
+    save_config(Config(dns_mode="subscription"))
+    assert load_config().dns_mode == "subscription"
+
+
+def test_dns_mode_invalid_value_ignored(tmp_path, monkeypatch):
+    p = tmp_path / "config.json"
+    p.write_text('{"dns_mode": "direct"}')
+    monkeypatch.setattr(config, "CONFIG_PATH", p)
+    assert load_config().dns_mode == "tunnel"

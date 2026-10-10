@@ -953,8 +953,12 @@ def test_dns_leak_server_row_falls_back_to_asn_without_org():
     assert "AS13335 CloudFlare Inc" in row[0]
 
 
-def _dns_leak_menu_env(monkeypatch, result, active=(), countries=None, ipv6_off=True):
-    """Wire dns_leak_test_menu()'s collaborators; returns the captured rows list."""
+def _dns_leak_menu_env(
+    monkeypatch, result, active=(), countries=None, ipv6_off=True, second_opinion=None
+):
+    """Wire dns_leak_test_menu()'s collaborators; returns the captured rows list.
+    second_opinion: what ipwho.is says about the exit IP's country."""
+    monkeypatch.setattr(vpn_manager.ipinfo, "country_of_ip", lambda ip: second_opinion)
     monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: None)
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     monkeypatch.setattr(vpn_manager.dnsleak, "run", lambda: result)
@@ -1468,3 +1472,115 @@ def test_happ_menu_passes_protocol_to_server_rows(monkeypatch, tmp_path):
     )
     vpn_manager.happ_menu(FakeProvider("Happ", []))
     assert "de    hysteria/tls" in seen[1]  # server level shows the protocol
+
+
+def _record_ipv6_guard(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        vpn_manager.ipv6guard, "disable", lambda: calls.append("disable") or ActionResult(True, "")
+    )
+    monkeypatch.setattr(
+        vpn_manager.ipv6guard, "enable", lambda: calls.append("enable") or ActionResult(True, "")
+    )
+    return calls
+
+
+def test_successful_connect_disables_ipv6_even_before_the_tunnel_shows_up(monkeypatch):
+    """Happ's keeper reports "connected" on happd's start ack — before xray
+    has created happ-xray, while happd's process list may still be the
+    cached pre-switch one. Re-probing active_connections() right then saw
+    nothing and ENABLED IPv6 on a live tunnel (journal, 17:19:34: xray
+    started and disable_ipv6=0 in the same second). A successful connect is
+    itself the proof something is up."""
+    wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    patch_menu_env(monkeypatch, [wg], picks=[])
+    calls = _record_ipv6_guard(monkeypatch)
+
+    assert vpn_manager.guarded_connect(wg, wg.connections()[0]).success
+    assert calls == ["disable"]
+
+
+def test_failed_connect_still_syncs_ipv6_with_what_is_actually_up(monkeypatch):
+    class Failing(FakeProvider):
+        def connect(self, conn):
+            return ActionResult(False, "nope")
+
+    wg = Failing("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
+    patch_menu_env(monkeypatch, [wg], picks=[])
+    calls = _record_ipv6_guard(monkeypatch)
+
+    assert not vpn_manager.guarded_connect(wg, wg.connections()[0]).success
+    assert calls == ["enable"]  # nothing up -> IPv6 back on
+
+
+def test_dns_leak_exit_row_trusts_name_flag_over_bridge_entry_country(monkeypatch):
+    """Whitelist-bypass servers ("🇩🇪 Германия+": every member is a DE+-RU-*
+    Russian entry relay) enter in RU and exit in DE by design. The sweep's
+    country is the entry IP's, so comparing against it flagged every such
+    server as a leak; the provider's flag names the exit country."""
+    bridge = "🇩🇪 Германия+"
+    seen = _dns_leak_menu_env(
+        monkeypatch,
+        _leak_result([], ip_country="DE"),
+        active=[_wg(bridge)],
+        countries={bridge: "RU"},
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert f"Exit matches {bridge} 🇩🇪" in seen[0]
+    assert not any(r.startswith("Leaked: exit") for r in seen[0])
+
+
+def test_dns_leak_exit_row_flags_exit_outside_the_name_flag_country(monkeypatch):
+    seen = _dns_leak_menu_env(
+        monkeypatch,
+        _leak_result([], ip_country="RU"),
+        active=[_wg("🇩🇪 Германия+")],
+        countries={"🇩🇪 Германия+": "RU"},  # entry RU must not excuse a RU exit
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert "Leaked: exit ≠ 🇩🇪 Германия+ 🇩🇪" in seen[0]
+
+
+def test_country_from_name_flag():
+    assert vpn_manager._name_flag_country("🇩🇪 Германия+") == "DE"
+    assert vpn_manager._name_flag_country("Fast 🇳🇱 NL-2") == "NL"  # not only leading
+    assert vpn_manager._name_flag_country("Germany #41294") is None
+    assert vpn_manager._name_flag_country("🇩 broken") is None  # lone regional indicator
+
+
+def test_dns_leak_exit_row_eu_flag_accepts_any_member_state(monkeypatch):
+    # 🇪🇺 is not a country: 13 real servers carry it and exit in NL/DE/EE...
+    cases = (("NL", "Exit matches 🇪🇺 Europe 🇪🇺"), ("RU", "Leaked: exit ≠ 🇪🇺 Europe 🇪🇺"))
+    for exit_cc, row in cases:
+        seen = _dns_leak_menu_env(
+            monkeypatch, _leak_result([], ip_country=exit_cc), active=[_wg("🇪🇺 Europe")]
+        )
+        vpn_manager.dns_leak_test_menu()
+        assert row in seen[0], exit_cc
+
+
+
+def test_dns_leak_exit_row_second_geo_opinion_clears_a_geo_db_mismatch(monkeypatch):
+    """Poland 1: bash.ws geolocated its exit 192.144.78.10 (leased IPbnb
+    block) to KR, ipwho.is to PL/Warsaw, ip-api to FR — while the resolvers
+    were Cloudflare's Polish PoP. One geo DB's opinion isn't a leak."""
+    seen = _dns_leak_menu_env(
+        monkeypatch,
+        _leak_result([], ip_country="KR"),
+        active=[_wg("🇵🇱 Польша 1")],
+        second_opinion="PL",
+    )
+    vpn_manager.dns_leak_test_menu()
+    assert "Exit matches 🇵🇱 Польша 1 🇵🇱 · bash.ws: 🇰🇷" in seen[0]
+
+
+def test_dns_leak_exit_row_still_leaks_when_second_opinion_disagrees_too(monkeypatch):
+    for second in ("KR", None):
+        seen = _dns_leak_menu_env(
+            monkeypatch,
+            _leak_result([], ip_country="KR"),
+            active=[_wg("🇵🇱 Польша 1")],
+            second_opinion=second,
+        )
+        vpn_manager.dns_leak_test_menu()
+        assert "Leaked: exit ≠ 🇵🇱 Польша 1 🇵🇱" in seen[0], second

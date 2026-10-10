@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import getpass
 import json
+import re
 import subprocess
 import sys
 from abc import ABC, abstractmethod
@@ -184,7 +185,14 @@ def guarded_connect(provider, connection: VPNConnection) -> ActionResult:
     result = provider.connect(connection)
     if ks_result and not ks_result.success:
         notify("Killswitch — warning", ks_result.message)
-    _sync_ipv6_guard()
+    if result.success:
+        # don't re-probe: Happ reports success on happd's start ack, before
+        # xray has created its TUN (and happd's process list may be the
+        # cached pre-switch one) — a probe then sees nothing up and turned
+        # IPv6 ON under a live tunnel. Success is proof enough.
+        _apply_ipv6_guard(ipv6guard.disable())
+    else:
+        _sync_ipv6_guard()
     return result
 
 
@@ -202,9 +210,12 @@ def _sync_ipv6_guard() -> None:
     route it, so it would otherwise leak straight past every tunnel) and
     back on once nothing is active."""
     if active_connections(providers=list(ALL_PROVIDERS)):
-        guard = ipv6guard.disable()
+        _apply_ipv6_guard(ipv6guard.disable())
     else:
-        guard = ipv6guard.enable()
+        _apply_ipv6_guard(ipv6guard.enable())
+
+
+def _apply_ipv6_guard(guard: ActionResult) -> None:
     if not guard.success:
         notify("IPv6 guard — warning", guard.message)
 
@@ -333,20 +344,56 @@ def _dns_leak_server_row(
     return (label, lambda: ActionResult(True, ""))
 
 
-def _dns_leak_exit_row(ip_country: str, active: list[VPNConnection]) -> str:
+_FLAG = re.compile("[\U0001f1e6-\U0001f1ff]{2}")  # a pair of regional indicators
+# 🇪🇺 is not a country — 13 real servers carry it and exit in a member state
+EU_MEMBERS = frozenset(
+    {
+        "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES",
+        "FI", "FR", "GR", "HR", "HU", "IE", "IT", "LT", "LU",
+        "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK",
+    }
+)
+
+
+def _exit_fits(expected: str, ip_country: str) -> bool:
+    return expected == ip_country or (expected == "EU" and ip_country in EU_MEMBERS)
+
+
+def _name_flag_country(name: str) -> str | None:
+    """Country code of the first flag emoji in a server name, if any."""
+    m = _FLAG.search(name)
+    if not m:
+        return None
+    return "".join(chr(ord("A") + ord(c) - 0x1F1E6) for c in m.group())
+
+
+def _dns_leak_exit_row(
+    ip_country: str, active: list[VPNConnection], exit_ip: str | None = None
+) -> str:
     """Does the public IP bash.ws saw fit the active connection? Compared by
-    country — the server's country comes from the reputation sweep's cache.
-    The exit IP legitimately differs from the endpoint (Happ bridges,
-    CDN-fronted xray), but a different country is a real red flag."""
+    country. The expected exit country is the flag in the server's name —
+    providers label servers by where traffic exits, and whitelist-bypass
+    bridges ("🇩🇪 Германия+", DE+-RU-* members) enter in RU and exit in DE by
+    design. Without a flag, the reputation sweep's (entry IP) country. The
+    exit IP legitimately differs from the endpoint (bridges, CDN-fronted
+    xray), but a different country than expected is a red flag — unless a
+    second geo DB (ipwho.is, ipinfo.country_of_ip) puts the same exit IP in
+    the expected country: leased blocks geolocate inconsistently."""
     if not active:
         return "No VPN active — this is your real IP"
-    known = [(c.name, reputation.country_of(c.name)) for c in active]
+    known = [(c.name, _name_flag_country(c.name) or reputation.country_of(c.name)) for c in active]
     known = [(name, cc) for name, cc in known if cc]
     if not known:
         return f"VPN: {active[0].name}"
     for name, cc in known:
-        if cc == ip_country:
+        if _exit_fits(cc, ip_country):
             return f"Exit matches {name} {ipinfo.flag_emoji(cc)}"
+    second = ipinfo.country_of_ip(exit_ip) if exit_ip else None
+    if second:
+        for name, cc in known:
+            if _exit_fits(cc, second):
+                flag, theirs = ipinfo.flag_emoji(cc), ipinfo.flag_emoji(ip_country)
+                return f"Exit matches {name} {flag} · bash.ws: {theirs}"
     name, cc = known[0]
     return f"Leaked: exit ≠ {name} {ipinfo.flag_emoji(cc)}"
 
@@ -387,7 +434,8 @@ def dns_leak_test_menu() -> ActionResult:
     if result["ip"]:
         flag = ipinfo.flag_emoji(ip_country)
         items.append((f"IP: {result['ip']} {flag}".strip(), lambda: ActionResult(True, "")))
-    items.append((_dns_leak_exit_row(ip_country, active), lambda: ActionResult(True, "")))
+    exit_row = _dns_leak_exit_row(ip_country, active, result["ip"])
+    items.append((exit_row, lambda: ActionResult(True, "")))
     items.append((_dns_leak_ipv6_row(bool(active)), lambda: ActionResult(True, "")))
     if result["dns_servers"]:
         items.extend(_dns_leak_server_row(s, ip_country, ip_asn) for s in result["dns_servers"])
@@ -638,6 +686,14 @@ def run_configure_wizard(prompter: Prompter) -> bool:
         else:
             enabled = prompter.confirm(f"Use {source.name}?", source.is_enabled())
             cfg.ip_sources.setdefault(source.key, {})["enabled"] = enabled
+
+    # no: route xray's DNS the way the subscription says — some pin their
+    # resolvers "direct", which sends every lookup out the real connection
+    tunnel = prompter.confirm(
+        "Force all Happ DNS through the VPN tunnel (ignore subscription DNS routing)?",
+        cfg.dns_mode == "tunnel",
+    )
+    cfg.dns_mode = "tunnel" if tunnel else "subscription"
 
     config.save_config(cfg)
     return True

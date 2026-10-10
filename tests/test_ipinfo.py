@@ -1,6 +1,8 @@
 import json
 import time
 
+import pytest
+
 import ipinfo
 
 
@@ -71,3 +73,30 @@ def test_update_failure_cached(tmp_path, monkeypatch):
     entry = json.loads(p.read_text())
     assert entry["error"] == "no route"
     assert ipinfo.status_line("conn", 600) is None
+
+
+def test_country_of_ip_uses_cache_for_the_same_ip(tmp_path, monkeypatch):
+    monkeypatch.setattr(ipinfo, "CACHE_PATH", tmp_path / "exit_ip.json")
+    (tmp_path / "exit_ip.json").write_text('{"ip": "1.2.3.4", "country_code": "PL"}')
+    monkeypatch.setattr(ipinfo, "_fetch", lambda: pytest.fail("cache hit must not fetch"))
+    assert ipinfo.country_of_ip("1.2.3.4") == "PL"
+
+
+def test_country_of_ip_fetches_when_cache_is_for_another_ip(tmp_path, monkeypatch):
+    monkeypatch.setattr(ipinfo, "CACHE_PATH", tmp_path / "exit_ip.json")
+    (tmp_path / "exit_ip.json").write_text('{"ip": "9.9.9.9", "country_code": "DE"}')
+    monkeypatch.setattr(ipinfo, "_fetch", lambda: {"ip": "1.2.3.4", "country_code": "pl"})
+    assert ipinfo.country_of_ip("1.2.3.4") == "PL"
+
+
+def test_country_of_ip_none_when_the_route_changed_or_lookup_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(ipinfo, "CACHE_PATH", tmp_path / "missing.json")
+    # a different public IP answering means a different exit — not an opinion on ours
+    monkeypatch.setattr(ipinfo, "_fetch", lambda: {"ip": "5.5.5.5", "country_code": "PL"})
+    assert ipinfo.country_of_ip("1.2.3.4") is None
+
+    def down():
+        raise OSError("offline")
+
+    monkeypatch.setattr(ipinfo, "_fetch", down)
+    assert ipinfo.country_of_ip("1.2.3.4") is None

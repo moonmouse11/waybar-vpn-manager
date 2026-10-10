@@ -153,3 +153,22 @@ def test_settings_menu_reports_no_op_when_wizard_declined(monkeypatch):
     result = vpn_manager.settings_menu()
     assert result.success is True
     assert "unchanged" in result.message
+
+
+def test_run_configure_wizard_asks_dns_mode_last(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [])
+    monkeypatch.setattr(vpn_manager.ipsources, "ALL_SOURCES", [])
+
+    # 6 TOOLS rows + killswitch, then "force DNS through the tunnel?" -> no
+    assert vpn_manager.run_configure_wizard(FakePrompter(confirms=[True] * 7 + [False]))
+    assert config.load_config().dns_mode == "subscription"
+
+
+def test_run_configure_wizard_dns_mode_defaults_to_tunnel(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [])
+    monkeypatch.setattr(vpn_manager.ipsources, "ALL_SOURCES", [])
+
+    assert vpn_manager.run_configure_wizard(FakePrompter(confirms=[True] * 7))  # Enter -> default
+    assert config.load_config().dns_mode == "tunnel"

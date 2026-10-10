@@ -471,18 +471,15 @@ def _socks_connect(port: int, host: str) -> None:
         pass
 
 
-def test_app_dns_tunnels_and_only_server_bootstrap_goes_direct(xray):
-    """Runs the real generated config and reads xray's routing decisions.
+def _routing_log(server: dict, want: dict[str, str], tunnel_dns: bool = True) -> str:
+    """Run the real generated config for `server` and return xray's log once
+    every `want` needle showed up (or 10 s passed), asserting each one.
 
-    Before the fix every lookup by xray's resolver was routed dns-in ->
-    dns-direct (real NIC, real IP). Now an app lookup must take the same
-    route as app traffic ("proxy" here), and only resolving the server's own
-    hostname may go dns-direct. The TUN inbound (needs root) is swapped for
-    a SOCKS one under the same "tun-in" tag, so every rule still applies."""
-    resolver = "8.8.8.8"
-    server = copy.deepcopy(_VLESS_REALITY_XHTTP)  # server address: de.example.com
-    server["dns"] = {"servers": [resolver]}
-    cfg = happmeta.build_runtime_config(server)
+    The TUN inbound (needs root) is swapped for a SOCKS one under the same
+    "tun-in" tag, so every rule still applies. Two test-only nudges make
+    xray use its built-in resolver: the proxy resolves its own (hostname)
+    address with it, and an "app" freedom outbound resolves app.example.net."""
+    cfg = happmeta.build_runtime_config(server, tunnel_dns=tunnel_dns)
     port = _free_port()
     cfg["inbounds"] = [
         {"tag": "tun-in", "protocol": "socks", "listen": "127.0.0.1", "port": port,
@@ -490,9 +487,7 @@ def test_app_dns_tunnels_and_only_server_bootstrap_goes_direct(xray):
     ]
     cfg["log"] = {"loglevel": "debug"}
     proxy = next(o for o in cfg["outbounds"] if o.get("tag") == "proxy")
-    # test-only: make xray resolve its server address with the built-in resolver
     proxy["streamSettings"]["sockopt"]["domainStrategy"] = "UseIPv4"
-    # test-only: an "app" whose lookup also goes through the built-in resolver
     cfg["outbounds"].append({"tag": "app", "protocol": "freedom",
                              "settings": {"domainStrategy": "UseIPv4"}})
     cfg["routing"]["rules"].insert(0, {"domain": ["full:app.example.net"], "outboundTag": "app"})
@@ -508,14 +503,10 @@ def test_app_dns_tunnels_and_only_server_bootstrap_goes_direct(xray):
         proc.stdin.write(json.dumps(cfg))
         proc.stdin.close()
         reader.start()
-        want = {
-            "tunneled": f"taking detour [proxy] for [udp:{resolver}:53]",
-            "bootstrap": f"taking detour [dns-direct] for [udp:{resolver}:53]",
-        }
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             _socks_connect(port, "app.example.net")  # app lookup
-            _socks_connect(port, "1.2.3.4")  # -> proxy -> resolve de.example.com
+            _socks_connect(port, "1.2.3.4")  # -> proxy -> resolve its hostname
             if all(any(w in line for line in list(lines)) for w in want.values()):
                 break
             time.sleep(0.3)
@@ -526,3 +517,46 @@ def test_app_dns_tunnels_and_only_server_bootstrap_goes_direct(xray):
     assert "Failed to start" not in log, log[-500:]
     for what, needle in want.items():
         assert needle in log, f"{what}: no '{needle}' in xray log:\n{log[-1500:]}"
+    return log
+
+
+def test_app_dns_tunnels_and_only_server_bootstrap_goes_direct(xray):
+    """Before #13 every lookup by xray's resolver was routed dns-in ->
+    dns-direct (real NIC, real IP). An app lookup must take the same route
+    as app traffic ("proxy" here); only resolving the server's own hostname
+    may go dns-direct."""
+    resolver = "8.8.8.8"
+    server = copy.deepcopy(_VLESS_REALITY_XHTTP)  # server address: de.example.com
+    server["dns"] = {"servers": [resolver]}
+    _routing_log(server, {
+        "tunneled": f"taking detour [proxy] for [udp:{resolver}:53]",
+        "bootstrap": f"taking detour [dns-direct] for [udp:{resolver}:53]",
+    })
+
+
+def _with_dns_direct_rule(resolver: str) -> dict:
+    """ARTΞMIDA's shape: the subscription pins its own resolver direct."""
+    server = copy.deepcopy(_VLESS_REALITY_XHTTP)
+    server["dns"] = {"servers": [resolver]}
+    server["routing"]["rules"].insert(
+        0, {"ip": [resolver], "ruleTag": "DNS_DIRECT", "outboundTag": "direct"}
+    )
+    return server
+
+
+def test_tunnel_dns_mode_beats_a_subscription_rule_pinning_dns_direct(xray):
+    """Germany 1 (ARTΞMIDA) still leaked after #13: its DNS_DIRECT rule sent
+    1.1.1.1 lookups out the real NIC. dns_mode "tunnel" must override it."""
+    resolver = "8.8.8.8"
+    log = _routing_log(_with_dns_direct_rule(resolver), {
+        "tunneled": f"taking detour [proxy] for [udp:{resolver}:53]",
+    })
+    assert "Hit route rule: [DNS_DIRECT]" not in log
+
+
+def test_subscription_dns_mode_keeps_the_providers_direct_dns(xray):
+    resolver = "8.8.8.8"
+    _routing_log(_with_dns_direct_rule(resolver), {
+        "provider's choice": f"Hit route rule: [DNS_DIRECT] so taking detour [direct] for "
+        f"[udp:{resolver}:53]",
+    }, tunnel_dns=False)

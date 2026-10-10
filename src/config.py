@@ -10,7 +10,8 @@ All keys optional; missing file means defaults:
   "exit_ip": {"enabled": true, "max_age_seconds": 600},
   "ip_sources": {"abuseipdb": {"api_key": "secret"}},  // IP source configurations
   "tools_visible": {"dns_leak_test": false},          // hide tools from menu
-  "speed_test_urls": ["http://10.0.0.5/100MB.bin"]     // extra Speed Test targets
+  "speed_test_urls": ["http://10.0.0.5/100MB.bin"],    // extra Speed Test targets
+  "dns_mode": "tunnel"                  // "tunnel" | "subscription": who routes xray's DNS
 }
 """
 
@@ -22,6 +23,7 @@ from pathlib import Path
 import fsutil
 
 CONFIG_PATH = Path.home() / ".config" / "vpn-manager" / "config.json"
+DNS_MODES = ("tunnel", "subscription")
 
 
 @dataclass
@@ -35,6 +37,9 @@ class Config:
     ip_sources: dict[str, dict] = field(default_factory=dict)
     tools_visible: dict[str, bool] = field(default_factory=dict)
     speed_test_urls: list[str] = field(default_factory=list)
+    # "tunnel": xray's DNS always follows the tunnel, overriding subscription
+    # rules that pin resolvers direct (a leak); "subscription": as shipped
+    dns_mode: str = "tunnel"
 
     def provider_visible(self, name: str) -> bool:
         return self.providers.get(name.lower(), True)
@@ -82,6 +87,9 @@ def load_config() -> Config:
     speed_test_urls = raw.get("speed_test_urls")
     if isinstance(speed_test_urls, list):
         cfg.speed_test_urls = [u for u in speed_test_urls if isinstance(u, str) and u]
+
+    if raw.get("dns_mode") in DNS_MODES:
+        cfg.dns_mode = raw["dns_mode"]
     return cfg
 
 
@@ -98,5 +106,6 @@ def save_config(cfg: Config) -> None:
         "ip_sources": cfg.ip_sources,
         "tools_visible": cfg.tools_visible,
         "speed_test_urls": cfg.speed_test_urls,
+        "dns_mode": cfg.dns_mode,
     }
     fsutil.write_json_atomic(CONFIG_PATH, raw, indent=2)

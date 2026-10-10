@@ -459,10 +459,17 @@ def update_subscriptions(force: bool = False) -> None:
 # ── Config merge (subscription config -> runnable xray config) ────────────────
 
 
-def build_runtime_config(server_cfg: dict) -> dict:
+def build_runtime_config(server_cfg: dict, tunnel_dns: bool = True) -> dict:
     """Merge a subscription server config like the Happ GUI does:
     local inbounds, dns-in tag, dns-out outbound, local routing rules,
-    drop the subscription's own catch-all (we append our own)."""
+    drop the subscription's own catch-all (we append our own).
+
+    tunnel_dns (config.json "dns_mode": "tunnel"): pin dns-in to the
+    subscription's own catch-all, ahead of its rules — otherwise a rule like
+    ARTΞMIDA's {"ip": ["1.1.1.1", ...], "ruleTag": "DNS_DIRECT",
+    "outboundTag": "direct"} sends every lookup out the real NIC. Costs the
+    provider's split DNS (e.g. Yandex for .ru via geoip:ru) — it then
+    resolves through the tunnel too; the traffic itself still splits."""
     cfg = copy.deepcopy(server_cfg)
     cfg["inbounds"] = copy.deepcopy(DEFAULT_INBOUNDS)
 
@@ -507,9 +514,44 @@ def build_runtime_config(server_cfg: dict) -> dict:
     rules = [
         r for r in rules if not (r.get("outboundTag") == "proxy" and r.get("network") == "tcp,udp")
     ]
-    cfg.setdefault("routing", {})["rules"] = [*LOCAL_ROUTING_RULES, *rules, CATCH_ALL_RULE]
+    dns_rules = []
+    if tunnel_dns:
+        dns_rules = [{"inboundTag": ["dns-in"], **_tunnel_target(rules, outbounds)}]
+    cfg.setdefault("routing", {})["rules"] = [
+        *LOCAL_ROUTING_RULES,
+        *dns_rules,
+        *rules,
+        CATCH_ALL_RULE,
+    ]
     cfg["log"] = {"loglevel": "info"}
     return cfg
+
+
+_CATCH_ALL_KEYS = {"type", "network", "ruleTag", "outboundTag", "balancerTag"}
+_TARGET_KEYS = ("balancerTag", "outboundTag")
+
+
+def _tunnel_target(rules: list[dict], outbounds: list[dict]) -> dict:
+    """Where app traffic goes by default: the subscription's last pure
+    catch-all rule (no matchers but network — an inboundTag-restricted one
+    like {"inboundTag": ["socks", "http"]} never sees dns-in/tun-in), else
+    our CATCH_ALL_RULE. Never a freedom outbound: a direct-by-default
+    (whitelist-style) subscription would take DNS out the real NIC with
+    it — the first real proxy outbound carries DNS instead."""
+    target = {"outboundTag": CATCH_ALL_RULE["outboundTag"]}
+    for rule in rules:
+        if set(rule) <= _CATCH_ALL_KEYS and any(k in rule for k in _TARGET_KEYS):
+            target = {k: rule[k] for k in _TARGET_KEYS if k in rule}
+    freedom = {o.get("tag") for o in outbounds if o.get("protocol") == "freedom"}
+    if target.get("outboundTag") in freedom:
+        proxy = next(
+            (o["tag"] for o in outbounds
+             if o.get("tag") and o.get("protocol") not in NON_PROXY_PROTOCOLS),
+            None,
+        )
+        if proxy:
+            return {"outboundTag": proxy}
+    return target
 
 
 def _is_ip(host: str) -> bool:
@@ -630,7 +672,10 @@ def match_server(name: str, servers: list[dict], provider_id: str | None = None)
 
 
 def resolve_config(
-    name: str, allow_fetch: bool = True, provider_id: str | None = None
+    name: str,
+    allow_fetch: bool = True,
+    provider_id: str | None = None,
+    tunnel_dns: bool = True,
 ) -> dict | None:
     """Runnable xray config for a server name: merged from the subscription
     when available, otherwise a captured config used as-is."""
@@ -638,7 +683,7 @@ def resolve_config(
     server = match_server(name, servers, provider_id)
     if server is not None:
         if server["provider_id"]:
-            return build_runtime_config(server["config"])
+            return build_runtime_config(server["config"], tunnel_dns=tunnel_dns)
         return server["config"]  # captured fallback
     return _configs().get(name)
 
