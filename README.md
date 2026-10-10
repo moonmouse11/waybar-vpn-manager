@@ -51,8 +51,8 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
   sources on by default; keyed sources like AbuseIPDB/IPQualityScore once an
   API key is configured), managed from the same `~/.config/vpn-manager/config.json`
 - **Settings** — 🛠 Tools → ⚙ Settings opens a small floating terminal with
-  every option and its current value: ↑/↓ to move, Enter to change it in place,
-  ✔ Accept to save (`vpn_manager.py --settings` runs it in any terminal). The terminal wizard
+  every option and its current value: ↑/↓ to move, Space to change it in place,
+  `s` to save, `q` to quit (`vpn_manager.py --settings` runs it in any terminal). The terminal wizard
   (`--configure`) asks the same questions one by one and runs as the last step
   of `make install`
 

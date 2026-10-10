@@ -11,6 +11,7 @@ import contextlib
 import getpass
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -736,6 +737,7 @@ def run_configure_wizard(prompter: Prompter) -> bool:
 # can't change a row in place or keep the cursor where it was.
 
 SETTINGS_WINDOW_CLASS = "TUI.float"  # omarchy floats + centres this class (875×600)
+SETTINGS_WINDOW_TITLE = "VPN Settings"
 
 
 def _settings_tool_keys() -> list[tuple[str, str]]:
@@ -747,17 +749,24 @@ def _settings_tool_keys() -> list[tuple[str, str]]:
 
 
 def settings_menu() -> ActionResult:
-    cmd = [
+    terminal = [
         "xdg-terminal-exec",
         f"--app-id={SETTINGS_WINDOW_CLASS}",
-        "--title=VPN Settings",
+        f"--title={SETTINGS_WINDOW_TITLE}",
         "-e",
         sys.executable,
         str(Path(__file__)),
         "--settings",
     ]
     if shutil.which("uwsm-app"):  # omarchy launches apps as their own systemd scope
-        cmd = ["uwsm-app", "--", *cmd]
+        terminal = ["uwsm-app", "--", *terminal]
+    # omarchy's launch-or-focus (what its TUIs open through): a second click
+    # focuses the open window instead of stacking another one. It matches the
+    # title too, and eval's the command — hence shlex.join.
+    if shutil.which("omarchy-launch-or-focus"):
+        cmd = ["omarchy-launch-or-focus", SETTINGS_WINDOW_TITLE, shlex.join(terminal)]
+    else:
+        cmd = terminal
     try:
         subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True

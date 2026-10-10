@@ -61,9 +61,10 @@ from the git history.
 ### Changed
 
 - **⚙ Settings is one list** in a small floating terminal instead of a chain
-  of Yes / No windows: every setting is a row showing its value (✅ / ⬜),
-  Enter changes it in place, **✔ Accept** saves, Esc or Cancel discards. The
-  terminal `--configure` wizard is unchanged.
+  of Yes / No windows, keyboard-driven like omarchy's own TUIs: every setting
+  is a row showing its value (✅ / ⬜), Space / Enter changes it in place, `s`
+  saves, `q` / Esc quits (asking first about unsaved changes). A second click
+  focuses the open window. The terminal `--configure` wizard is unchanged.
 - Menus open in one fixed-size window instead of growing and shrinking with
   the rows on screen.
 - The DNS Leak Test expects the exit country from the flag in the server name

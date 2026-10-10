@@ -1,5 +1,5 @@
-"""⚙ Settings: a list in a floating terminal. Enter changes a row in place
-(cursor and order stay), ✔️ Accept saves the draft, Cancel / Esc drops it."""
+"""⚙ Settings: a list in a floating terminal. Space/Enter changes a row in
+place (cursor and order stay), `s` saves the draft, `q`/Esc drops it."""
 
 from types import SimpleNamespace
 
@@ -9,7 +9,7 @@ import config
 import ipsources
 import settings_tui
 import vpn_manager
-from settings_tui import ACCEPT_LABEL, CANCEL_LABEL, SettingsState
+from settings_tui import SettingsState
 
 TOOLS = [("dns_leak_test", "🔍 DNS Leak Test"), ("killswitch", "🛡️ Killswitch")]
 
@@ -29,9 +29,9 @@ def _texts(state):
     return [r.text for r in state.rows()]
 
 
-def test_one_list_with_sections_and_accept_cancel_last(state):
+def test_one_list_with_sections_and_no_button_rows(state):
     texts = _texts(state)
-    assert texts[-2:] == [ACCEPT_LABEL, CANCEL_LABEL]
+    assert texts[-1] == "🔑 IPQualityScore: no API key"  # save/quit are keys, not rows
     for header in ("── General ──", "── Providers ──", "── Tools ──", "── IP sources ──"):
         assert header in texts
     assert "✅ WireGuard" in texts
@@ -61,8 +61,6 @@ def test_nothing_is_written_before_accept(state):
     _go(state, "✅ DNS always")
     state.activate()
     assert not config.CONFIG_PATH.exists()
-    _go(state, ACCEPT_LABEL)
-    assert state.activate() == "accept"
     assert state.save() is True
     assert config.load_config().dns_mode == "subscription"
 
@@ -73,14 +71,6 @@ def test_toggling_back_is_not_a_change(state):
     state.activate()
     assert not state.dirty
     assert state.save() is False
-    assert not config.CONFIG_PATH.exists()
-
-
-def test_cancel_ends_without_saving(state):
-    _go(state, "✅ Happ")
-    state.activate()
-    _go(state, CANCEL_LABEL)
-    assert state.activate() == "cancel"
     assert not config.CONFIG_PATH.exists()
 
 
@@ -100,9 +90,9 @@ def test_move_skips_headers_and_stops_at_the_ends(state):
     state.move(2)  # killswitch mode, then over "── Providers ──"
     assert state.current.text == "✅ WireGuard"
     state.move(100)
-    assert state.current.text == CANCEL_LABEL
+    assert state.current.text == "🔑 IPQualityScore: no API key"  # bottom: no wrap
     state.move(-1)
-    assert state.current.text == ACCEPT_LABEL
+    assert state.current.text == "🔑 AbuseIPDB: no API key"
 
 
 def test_keyless_source_toggles(state):
@@ -140,7 +130,7 @@ def test_settings_cannot_hide_itself():
     assert "killswitch" in keys
 
 
-def test_settings_menu_opens_a_floating_terminal(monkeypatch):
+def test_settings_menu_opens_a_floating_terminal_without_omarchy(monkeypatch):
     launched = []
     monkeypatch.setattr(vpn_manager.shutil, "which", lambda name: None)
     monkeypatch.setattr(
@@ -153,6 +143,18 @@ def test_settings_menu_opens_a_floating_terminal(monkeypatch):
     assert f"--app-id={vpn_manager.SETTINGS_WINDOW_CLASS}" in cmd
     assert cmd[-1] == "--settings"
     assert kw["start_new_session"] is True
+
+
+def test_settings_menu_focuses_an_open_window_on_omarchy(monkeypatch):
+    launched = []
+    monkeypatch.setattr(vpn_manager.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(vpn_manager.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd))
+    vpn_manager.settings_menu()
+    cmd = launched[0]
+    assert cmd[:2] == ["omarchy-launch-or-focus", vpn_manager.SETTINGS_WINDOW_TITLE]
+    # one string — launch-or-focus eval's it
+    assert cmd[2].startswith("uwsm-app -- xdg-terminal-exec ")
+    assert cmd[2].endswith(" --settings")
 
 
 def test_settings_menu_reports_a_missing_terminal_launcher(monkeypatch):
