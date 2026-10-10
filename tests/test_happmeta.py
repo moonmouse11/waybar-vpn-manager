@@ -919,12 +919,12 @@ def test_build_runtime_config_marks_only_proxy_outbounds_for_killswitch():
     # split-tunnel "direct" stays unmarked: the killswitch blocks it by design
     assert "mark" not in by_tag["direct"].get("streamSettings", {}).get("sockopt", {})
     assert "streamSettings" not in by_tag["block"]
-    # xray's own resolver gets a marked freedom outbound so the killswitch
-    # can't break bootstrapping a domain-based server address
+    # bootstrapping a domain-based server address gets a marked freedom
+    # outbound so the killswitch can't break it
     assert by_tag["dns-direct"]["protocol"] == "freedom"
     assert by_tag["dns-direct"]["streamSettings"]["sockopt"]["mark"] == mark
-    dns_in_rule = next(r for r in cfg["routing"]["rules"] if r.get("inboundTag") == ["dns-in"])
-    assert dns_in_rule["outboundTag"] == "dns-direct"
+    rule = next(r for r in cfg["routing"]["rules"] if r.get("outboundTag") == "dns-direct")
+    assert rule["inboundTag"] == [happmeta.DNS_BOOTSTRAP_TAG]
 
 
 def test_build_runtime_config_chains_dns_out_through_existing_proxy_tag():
@@ -950,3 +950,68 @@ def test_subscription_targets_from_provider_urls(tmp_path, monkeypatch):
         ("P1", "sub.example.ru", 443),
         ("P2", "sub.example.com", 8443),
     ]
+
+
+def _dns_rules(cfg):
+    return [r for r in cfg["routing"]["rules"] if r.get("outboundTag") == "dns-direct"]
+
+
+def test_app_dns_is_never_routed_direct():
+    """xray's resolver used to go dns-in -> dns-direct: every app lookup
+    (tun:53 -> dns-out -> built-in DNS) left via the real NIC from the real
+    IP — DNS leak test showed a Russian Cloudflare node behind a DE exit.
+    dns-in must fall through to the same rules as app traffic (tunnel or
+    balancer); only the bootstrap tag may go direct."""
+    cfg = happmeta.build_runtime_config(_HYSTERIA_BALANCER)
+    assert cfg["dns"]["tag"] == "dns-in"
+    assert not any("dns-in" in (r.get("inboundTag") or []) for r in cfg["routing"]["rules"])
+    assert all(r["inboundTag"] == [happmeta.DNS_BOOTSTRAP_TAG] for r in _dns_rules(cfg))
+
+
+def test_domain_server_addresses_bootstrap_direct_via_tagged_resolver():
+    server_cfg = {
+        **_HYSTERIA_BALANCER,  # DE-1 is an IP, DE-2 is de2.example.com
+        "dns": {"servers": ["https://1.1.1.1/dns-query", "8.8.8.8"], "queryStrategy": "UseIPv4"},
+    }
+    cfg = happmeta.build_runtime_config(server_cfg)
+    boot = cfg["dns"]["servers"][0]
+    assert boot["tag"] == happmeta.DNS_BOOTSTRAP_TAG
+    assert boot["domains"] == ["full:de2.example.com"]  # never the IP member
+    assert boot["skipFallback"] is True  # other names must not fall back to it
+    assert boot["address"] == "https://1.1.1.1/dns-query"  # subscription's own resolver
+    assert cfg["dns"]["servers"][1:] == ["https://1.1.1.1/dns-query", "8.8.8.8"]
+    assert cfg["dns"]["queryStrategy"] == "UseIPv4"
+    # the bootstrap rule precedes every subscription rule
+    rules = cfg["routing"]["rules"]
+    assert rules.index(_dns_rules(cfg)[0]) < len(happmeta.LOCAL_ROUTING_RULES)
+
+
+def test_ip_only_servers_need_no_bootstrap_resolver():
+    server_cfg = {
+        "remarks": "ip",
+        "outbounds": [{"protocol": "hysteria", "tag": "proxy",
+                       "settings": {"address": "198.51.100.1", "port": 443, "version": 2}}],
+        "dns": {"servers": ["8.8.8.8"]},
+    }
+    cfg = happmeta.build_runtime_config(server_cfg)
+    assert cfg["dns"]["servers"] == ["8.8.8.8"]
+
+
+def test_bootstrap_resolver_skips_domain_restricted_and_hostname_resolvers():
+    server_cfg = {
+        **_HYSTERIA_BALANCER,
+        "dns": {
+            "servers": [
+                {"address": "https://77.88.8.8/dns-query", "domains": ["regexp:.*\\.ru$"]},
+                "https://dns.google/dns-query",  # needs resolving itself
+                {"address": "1.0.0.1", "port": 53},
+            ]
+        },
+    }
+    boot = happmeta.build_runtime_config(server_cfg)["dns"]["servers"][0]
+    assert boot["address"] == "1.0.0.1"
+
+
+def test_bootstrap_resolver_falls_back_when_subscription_has_none():
+    boot = happmeta.build_runtime_config(_HYSTERIA_BALANCER)["dns"]["servers"][0]
+    assert boot["address"] == happmeta.DNS_BOOTSTRAP_FALLBACK

@@ -15,6 +15,7 @@ import base64
 import contextlib
 import copy
 import hashlib
+import ipaddress
 import json
 import re
 import socket
@@ -85,12 +86,23 @@ DEFAULT_INBOUNDS = [
 KILLSWITCH_MARK = 0x6B73  # "ks"
 NON_PROXY_PROTOCOLS = ("freedom", "blackhole", "dns")
 
+# xray's built-in resolver answers every app A/AAAA lookup (tun:53 ->
+# dns-out -> handleIPQuery), tagged "dns-in". That tag deliberately has no
+# rule of its own: lookups fall through to the same rules as app traffic
+# (tunnel/balancer, or a subscription's split-tunnel "direct"). It used to
+# go straight to dns-direct — every lookup left the real NIC from the real
+# IP. Only the server's own hostnames may resolve outside the tunnel (the
+# tunnel can't carry the lookup that finds it): a dedicated resolver entry,
+# restricted to exactly those names and tagged DNS_BOOTSTRAP_TAG, goes to
+# dns-direct — killswitch-marked, so blocking split-tunnel "direct" can't
+# break the tunnel itself. (A DNS server's own "tag" is honoured by xray's
+# routing on 26.3.27-26.9.30, verified against the real binaries.)
+DNS_BOOTSTRAP_TAG = "dns-bootstrap"
+DNS_BOOTSTRAP_FALLBACK = "https://1.1.1.1/dns-query"
+
 LOCAL_ROUTING_RULES = [
     {"inboundTag": ["tun-in"], "outboundTag": "direct", "process": ["self/", "xray"]},
-    # xray's own resolver: needed to bootstrap a domain-based server address
-    # (CLAUDE.md, IPv6 leak guard) — a dedicated, killswitch-marked freedom
-    # outbound, so blocking split-tunnel "direct" can't break the tunnel itself
-    {"inboundTag": ["dns-in"], "outboundTag": "dns-direct"},
+    {"inboundTag": [DNS_BOOTSTRAP_TAG], "outboundTag": "dns-direct"},
     {"inboundTag": ["tun-in"], "network": "tcp,udp", "outboundTag": "dns-out", "port": "53"},
 ]
 CATCH_ALL_RULE = {"network": "tcp,udp", "outboundTag": "proxy"}
@@ -456,6 +468,15 @@ def build_runtime_config(server_cfg: dict) -> dict:
 
     dns = cfg.get("dns") or {}
     dns["tag"] = "dns-in"
+    hosts = [h for h, _port in server_endpoints_of(server_cfg) if not _is_ip(h)]
+    if hosts:
+        bootstrap = {
+            "address": _bootstrap_resolver(dns.get("servers") or []),
+            "domains": [f"full:{h}" for h in hosts],
+            "skipFallback": True,  # nothing else may fall back onto it
+            "tag": DNS_BOOTSTRAP_TAG,
+        }
+        dns["servers"] = [bootstrap, *(dns.get("servers") or [])]
     cfg["dns"] = dns
 
     outbounds = cfg.get("outbounds") or []
@@ -467,12 +488,11 @@ def build_runtime_config(server_cfg: dict) -> dict:
     if dns_outbound is None:
         dns_outbound = {"protocol": "dns", "tag": "dns-out"}
         outbounds.append(dns_outbound)
-    # Without this, DNS queries forwarded by dns-out are dialed by the
-    # dns-in rule below (outboundTag "direct") — i.e. straight out the
-    # real network, leaking resolver identity/location even though app
-    # traffic tunnels through "proxy". Chaining dns-out's own transport
-    # through "proxy" keeps queries inside the tunnel instead. Balancer
-    # configs have no "proxy" tag at all — chain through their first real
+    # Only covers what dns-out forwards itself: non-A/AAAA queries, which
+    # xray rejects by default (nonIPQuery) — A/AAAA go to the built-in
+    # resolver, routed via "dns-in" (see DNS_BOOTSTRAP_TAG). Kept so a
+    # subscription that enables nonIPQuery forwarding still tunnels it.
+    # Balancer configs have no "proxy" tag — chain through their first real
     # proxy outbound rather than a tag that resolves to nothing.
     # sockopt.dialerProxy, not the old proxySettings.transportLayer: xray
     # 26.x (Happ 4.5.2) refuses to start on any outbound with proxySettings.
@@ -490,6 +510,34 @@ def build_runtime_config(server_cfg: dict) -> dict:
     cfg.setdefault("routing", {})["rules"] = [*LOCAL_ROUTING_RULES, *rules, CATCH_ALL_RULE]
     cfg["log"] = {"loglevel": "info"}
     return cfg
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def _bootstrap_resolver(servers: list) -> str:
+    """The subscription's first resolver usable for bootstrap: unrestricted
+    (no "domains" list — those answer only their own names) and addressed
+    by IP, plain or DoH (a hostname resolver would itself need a lookup
+    before the tunnel exists). Otherwise DNS_BOOTSTRAP_FALLBACK."""
+    for server in servers:
+        if isinstance(server, dict):
+            if server.get("domains"):
+                continue
+            address = server.get("address")
+        else:
+            address = server
+        if not isinstance(address, str):
+            continue
+        host = urllib.parse.urlsplit(address).hostname if "://" in address else address
+        if host and _is_ip(host):
+            return address
+    return DNS_BOOTSTRAP_FALLBACK
 
 
 def _set_mark(outbound: dict) -> dict:
