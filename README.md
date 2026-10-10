@@ -158,7 +158,7 @@ src/
   ipv6guard.py        disables IPv6 system-wide while any tunnel is active (leak guard)
   reputation.py       exit-IP reputation orchestrator over ipsources/
   dnsleak.py          DNS leak test (dnsleaktest.com protocol, no external script)
-  speedtest.py        single-measurement tunnel throughput (Cloudflare)
+  speedtest.py        tunnel throughput: preset services + custom URLs
   logutil.py          file logging
   providers/          VPN backend registry + implementations (VPNProvider ABC)
   ipsources/          IP-intelligence source registry + implementations (IPInfoSource ABC)

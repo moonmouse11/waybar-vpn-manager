@@ -450,7 +450,12 @@ def speed_test_menu() -> ActionResult:
     # public presets, then custom URLs remembered in config.json
     # (`speed_test_urls` — e.g. a test stand's own file server)
     targets = [("🌐", s.name, s.url) for s in speedtest.SERVICES]
-    targets += [("🔗", url, url) for url in config.load_config().speed_test_urls]
+    preset_urls = {s.url for s in speedtest.SERVICES}
+    targets += [
+        ("🔗", url, url)
+        for url in config.load_config().speed_test_urls
+        if url not in preset_urls  # its preset row already covers it
+    ]
     every = [(name, url) for _icon, name, url in targets]
     items: list[tuple[str, callable]] = [
         (SPEED_TEST_ALL_LABEL, lambda: _run_speed_tests(every, SPEED_TEST_ALL_DURATION))

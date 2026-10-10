@@ -12,6 +12,7 @@ import http.client
 import time
 import urllib.request
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import logutil
 
@@ -27,7 +28,6 @@ ERROR_MAXLEN = 80  # keeps a failure row readable in the walker window
 
 @dataclass(frozen=True)
 class Service:
-    key: str
     name: str
     url: str
 
@@ -35,15 +35,16 @@ class Service:
 SERVICES = [
     # Cloudflare 403s above 50 MB per request (and to urllib's default
     # User-Agent — see USER_AGENT)
-    Service("cloudflare", "Cloudflare", "https://speed.cloudflare.com/__down?bytes=50000000"),
-    Service("ovh", "OVH (FR)", "https://proof.ovh.net/files/100Mb.dat"),
+    Service("Cloudflare", "https://speed.cloudflare.com/__down?bytes=50000000"),
+    Service("OVH (FR)", "https://proof.ovh.net/files/100Mb.dat"),
     # fsn1-speed.hetzner.com reset connections from some VPN exits; nbg1 didn't
-    Service("hetzner", "Hetzner (DE)", "https://nbg1-speed.hetzner.com/100MB.bin"),
+    Service("Hetzner (DE)", "https://nbg1-speed.hetzner.com/100MB.bin"),
 ]
 
 
 def is_valid_url(url: str) -> bool:
-    return url.startswith(("http://", "https://")) and len(url) > len("https://")
+    parts = urlsplit(url)
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
 
 
 @dataclass(frozen=True)

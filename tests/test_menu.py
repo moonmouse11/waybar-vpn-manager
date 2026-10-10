@@ -833,7 +833,7 @@ def test_speed_test_all_services_runs_each_in_turn_and_names_fastest(monkeypatch
     monkeypatch.setattr(
         vpn_manager.speedtest,
         "SERVICES",
-        [vpn_manager.speedtest.Service(k, k.upper(), f"http://{k}") for k in "ab"],
+        [vpn_manager.speedtest.Service(k.upper(), f"http://{k}") for k in "ab"],
     )
     called = []
     _, notes, windows = _speed_test_env(
@@ -883,6 +883,30 @@ def test_speed_test_custom_url_is_measured_and_remembered(monkeypatch):
     assert vpn_manager._speed_test_custom_url().success
     assert called == ["http://new/b"]
     assert saved and saved[0].speed_test_urls == ["http://new/b", "http://old/a"]
+
+
+def test_speed_test_custom_urls_capped_newest_first(monkeypatch):
+    saved = []
+    old = [f"http://old/{i}" for i in range(vpn_manager.SPEED_TEST_MAX_URLS)]
+    _speed_test_env(monkeypatch, measure=lambda url, d: _ok(5.0), urls=old)
+    monkeypatch.setattr(vpn_manager.config, "save_config", saved.append)
+    monkeypatch.setattr(vpn_manager, "walker_input", lambda prompt: "http://new/x")
+    assert vpn_manager._speed_test_custom_url().success
+    assert saved[0].speed_test_urls == ["http://new/x", *old[:-1]]
+
+
+def test_speed_test_custom_url_matching_a_preset_is_not_listed_twice(monkeypatch):
+    preset = vpn_manager.speedtest.SERVICES[0]
+    called = []
+    *_, windows = _speed_test_env(
+        monkeypatch,
+        measure=lambda url, d: called.append(url) or _ok(1.0),
+        urls=[preset.url],
+        picks=[vpn_manager.SPEED_TEST_ALL_LABEL],
+    )
+    vpn_manager.speed_test_menu()
+    assert not any(preset.url in row for row in windows[0][1])
+    assert called.count(preset.url) == 1
 
 
 def test_speed_test_custom_url_rejects_non_http(monkeypatch):

@@ -100,3 +100,9 @@ def test_malformed_ip_sources_and_tools_visible_ignored(tmp_path, monkeypatch):
     cfg = load_config()
     assert cfg.ip_sources == {}
     assert cfg.tools_visible == {}
+
+
+def test_speed_test_urls_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    save_config(Config(speed_test_urls=["http://10.0.0.5/f.bin", "https://x/y"]))
+    assert load_config().speed_test_urls == ["http://10.0.0.5/f.bin", "https://x/y"]
