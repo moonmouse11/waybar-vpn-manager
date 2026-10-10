@@ -474,10 +474,13 @@ def build_runtime_config(server_cfg: dict) -> dict:
     # through "proxy" keeps queries inside the tunnel instead. Balancer
     # configs have no "proxy" tag at all — chain through their first real
     # proxy outbound rather than a tag that resolves to nothing.
+    # sockopt.dialerProxy, not the old proxySettings.transportLayer: xray
+    # 26.x (Happ 4.5.2) refuses to start on any outbound with proxySettings.
     tags = [o.get("tag") for o in proxies if o.get("tag")]
     if tags:
         via = "proxy" if "proxy" in tags else tags[0]
-        dns_outbound.setdefault("proxySettings", {"tag": via, "transportLayer": True})
+        sockopt = dns_outbound.setdefault("streamSettings", {}).setdefault("sockopt", {})
+        sockopt.setdefault("dialerProxy", via)
     cfg["outbounds"] = outbounds
 
     rules = list(cfg.get("routing", {}).get("rules", []))

@@ -42,6 +42,8 @@ from .happ import (
     _recv_frame,
     _routing_asset_dir,
     _send_frame,
+    notify_failure,
+    xray_config_error,
 )
 
 IFACES = {"ss": "keys-ss-tun0", "vless": "keys-vless-tun0"}  # ≤15 chars (kernel IFNAMSIZ)
@@ -452,6 +454,11 @@ def run_keeper(kind: str, server_id: str) -> None:
             _write_keeper_state(state_path, state)
             return
         cfg = _build_xray_config(server)
+        if reason := xray_config_error(cfg, _routing_asset_dir()):
+            logutil.log(f"keys keeper: xray rejected the config: {reason}")
+            state.update(status="error", message=f"xray rejected the config: {reason}")
+            _write_keeper_state(state_path, state, own=True)
+            return
 
         # happd occasionally kills the managed xray without telling us (observed
         # after ~1-9 min, no journal trace). Re-arm the start a few times on an
@@ -519,7 +526,14 @@ def run_keeper(kind: str, server_id: str) -> None:
             finally:
                 sock.close()
             logutil.log(f"keys keeper: tunnel ended: {exit_reason}")
-            if exit_reason != f"iface {iface} gone" or attempts >= max_attempts:
+            if exit_reason != f"iface {iface} gone":
+                break
+            if attempts >= max_attempts:
+                notify_failure(
+                    f"{LABELS[kind]} — tunnel lost",
+                    f"{server['name']}: xray kept dying, gave up after {attempts} attempts "
+                    "— see vpn-manager.log / journalctl -u happd",
+                )
                 break
             logutil.log(f"keys keeper: xray died unexpectedly, re-arming in {backoff:.0f}s")
             time.sleep(backoff)
