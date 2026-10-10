@@ -24,6 +24,13 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
 - **IPv6 leak guard** — none of the providers tunnel IPv6, so a live IPv6 route
   (including IPv6 DNS) would otherwise bypass every tunnel entirely; disabled
   system-wide for as long as any connection is active, restored once idle
+- **DNS through the tunnel** — xray's resolver (Happ, VLESS, Shadowsocks) sends
+  every lookup through the tunnel; only the server's own hostname resolves
+  directly. `dns_mode: "subscription"` keeps a subscription's own DNS routing
+  instead (some route their resolvers `direct`)
+- **Errors as notifications** — a config the installed xray rejects (e.g. after
+  a Happ update), a tunnel that died for good, or a failed tool shows a critical
+  notification with the reason instead of failing silently
 - **Config import** — WireGuard/OpenVPN (system dirs) and via `nmcli connection import`
 - **Profile management** — autostart toggle (systemd `wg-quick@` / NM autoconnect),
   config delete, all from the menu
@@ -32,7 +39,14 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
 - **NetworkManager provider** — shows/controls any VPN connection NM manages
   (openvpn, wireguard, vpnc, ikev2, openconnect, …)
 - **🛠 Tools submenu** — DNS Leak Test, IP Info, Speed Test, Refresh All,
-  Clear Caches, Settings and Killswitch, grouped off the main menu
+  Clear Caches, Settings and Killswitch, grouped off the main menu. The long
+  ones (DNS Leak Test, IP Info, Speed Test) report progress in one notification
+  updated step by step
+- **DNS Leak Test** — bash.ws's protocol plus checks of its own: resolvers
+  tagged by ASN / country, the exit country compared with the server's flag
+  (cross-checked with a second geo database), the IPv6 state
+- **Speed Test** — preset services (Cloudflare, OVH, Hetzner), remembered custom
+  URLs or all of them in a row; throughput in Mbit/s, with or without a VPN
 - **Pluggable IP sources** — multi-source exit-IP/reputation lookups (free
   sources on by default; keyed sources like AbuseIPDB/IPQualityScore once an
   API key is configured), managed from the same `~/.config/vpn-manager/config.json`
@@ -50,7 +64,8 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
 - `walker` — dmenu picker for the menus
 - `wireguard-tools` (`wg-quick`), `openvpn`, `openresolv`
 - `iproute2` (`ip`, `ss`), `nftables` (killswitch), `sudo` (NOPASSWD rules from `install.sh`)
-- `libnotify` (`notify-send`), `curl`, `procps-ng` (`pgrep`/`pkill`)
+- `libnotify` (`notify-send`; progress is updated in place with `-p`/`-r`, an
+  older `notify-send` shows each step separately), `curl`, `procps-ng` (`pgrep`/`pkill`)
 
 **Optional providers, detected at runtime:**
 
@@ -65,7 +80,7 @@ Opens with a **SUPER+Shift+V** shortcut or a waybar click.
 ## Install
 
 ```bash
-git clone https://github.com/your-username/waybar-vpn-manager
+git clone https://github.com/moonmouse11/waybar-vpn-manager
 cd waybar-vpn-manager
 make install
 ```
@@ -106,14 +121,20 @@ provider appear automatically.
 - Status tooltip: traffic, exit IP + country
 - Logs: `~/.local/state/vpn-manager/vpn-manager.log`
 - Caches: `~/.cache/vpn-manager/` (exit IP, pings, subscriptions)
+- After a Happ update breaks headless connect, the critical notification carries
+  xray's own error; the log has the full output
 
 ### User config (`~/.config/vpn-manager/config.json`)
 
 ```jsonc
 {
-  "providers": {"outline": false},      // hide providers from menu/status
+  "providers": {"openvpn": false},      // hide providers from menu/status
   "killswitch_mode": "happ",            // "off" | "happ" | "all" — auto-manage killswitch
+  "show_empty_providers": false,        // show providers without connections (import rows)
+  "happ_gui_fallback": false,           // open the Happ window when headless connect fails
   "exit_ip": {"enabled": true, "max_age_seconds": 600},
+  "dns_mode": "tunnel",                 // "tunnel" | "subscription" — who routes xray's DNS
+  "speed_test_urls": ["http://10.0.0.5/100MB.bin"],  // extra Speed Test targets
   "ip_sources": {                       // 🛠 Tools → IP Info source configuration
     "abuseipdb": {"api_key": "..."},    // keyed sources: enabled by setting api_key
     "ipwhois": {"enabled": true}        // free sources: enabled by default, opt-out here
@@ -123,7 +144,12 @@ provider appear automatically.
 ```
 
 Run the interactive wizard (`--configure`, or ⚙ Settings in the 🛠 Tools menu) instead of
-hand-editing `ip_sources`/`tools_visible` if you'd rather be walked through it.
+hand-editing `ip_sources`/`tools_visible`/`dns_mode` if you'd rather be walked through it.
+
+`dns_mode: "tunnel"` (the default) costs a subscription's split DNS: `.ru` names
+that it would resolve via Yandex DNS resolve through the tunnel too — the
+traffic itself still splits. Pick `"subscription"` if that matters more than
+DNS privacy.
 
 ## Killswitch
 
@@ -151,7 +177,9 @@ Happ connect --> --happ-keeper (long-lived happd session owning xray)
 
 src/
   vpn_manager.py      entry point: status, menu, Tools submenu, configure wizard
-  config.py           user config load/save (providers, tools_visible, ip_sources, …)
+  config.py           user config load/save (providers, tools_visible, ip_sources, dns_mode, …)
+  notifyutil.py       notify-send wrapper: text sanitising, in-place progress
+  fsutil.py           atomic 0600 JSON writes for state/cache/config
   ipinfo.py           exit IP cache (+ --update-ip worker)
   happmeta.py         Happ subscriptions, config merge, ping cache
   killswitch.py       nft killswitch wrapper (mode-aware)
@@ -189,10 +217,17 @@ make test-docker-build   # once, or after pyproject.toml's dev deps change
 make test-docker         # every run after that
 ```
 
+The image also carries pinned upstream xray releases: `tests/test_xray_compat.py`
+checks every config the plugin generates against each of them (`xray run -test`,
+plus a real run that checks where DNS is routed), so an xray release that
+drops a field we emit is caught before Happ ships it. Skipped outside the image.
+
 CI (`.github/workflows/`) runs on GitHub-hosted runners, which have none of
-your local VPN/happd state to begin with — it uses the plain venv path, not
-Docker. `Dockerfile.test` / `make test-docker*` are dev-only; installing the
-plugin (`make install`) never touches Docker.
+your local VPN/happd state to begin with — the main suite uses the plain venv
+path. `xray-compat.yml` builds the same `Dockerfile.test` image for the pinned
+xray versions on every pull request, and weekly tests the newest upstream
+release (pre-releases included). Installing the plugin (`make install`) never
+touches Docker.
 
 ## Adding a new VPN provider
 

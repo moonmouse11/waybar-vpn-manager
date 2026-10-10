@@ -282,3 +282,59 @@ def test_keeper_rejected_config_is_an_error_and_never_started(tmp_path, monkeypa
     final = json.loads((tmp_path / "keys-keeper-vless.json").read_text())
     assert final["status"] == "exited"  # after the error state the menu already reported
     assert "bad field" in final["message"]
+
+
+def test_keeper_exits_on_happd_452_requested_stop(tmp_path, monkeypatch):
+    """Same happd 4.5.2 protocol change as the Happ keeper: a requested stop
+    is "finished" with data "15", never "stopped" — must not loop forever."""
+    from test_happ import FakeSock, _frame
+
+    socks = []
+
+    def session():
+        ack = _frame({"request-id": "wm-keys-1", "status": "started"})
+        pid = "xray-keys-vless"
+        stop = _frame({"data": "Process crashed", "event": "error", "process-id": pid}) + _frame(
+            {"data": "15", "event": "finished", "process-id": pid}
+        )
+        socks.append(FakeSock(ack + stop, raise_timeout=True))
+        return socks[-1]
+
+    monkeypatch.setattr(keys, "KEEPER_STATE_DIR", tmp_path)
+    monkeypatch.setattr(keys, "_load_servers", lambda: [{"name": "K", "kind": "vless"}])
+    monkeypatch.setattr(keys, "_server_id", lambda s: "id1")
+    monkeypatch.setattr(keys, "_build_xray_config", lambda s: {"outbounds": []})
+    monkeypatch.setattr(keys, "_routing_asset_dir", lambda: None)
+    monkeypatch.setattr(keys, "xray_config_error", lambda cfg, asset_dir: None)
+    monkeypatch.setattr(keys, "_open_session", session)
+    monkeypatch.setattr(keys, "_iface_exists", lambda name: True)
+    monkeypatch.setattr(keys.time, "time_ns", lambda: 1)
+
+    keys.run_keeper("vless", "id1")
+
+    assert len(socks) == 1  # exited, never re-armed
+    final = json.loads((tmp_path / "keys-keeper-vless.json").read_text())
+    assert final["status"] == "exited"
+
+
+
+@pytest.mark.parametrize("action", ["disconnect", "_stop_running"])
+def test_keys_drop_the_process_list_cache_when_changing_happd(tmp_path, monkeypatch, action):
+    """Same stale 3 s cache as Happ's phantom connection: a stopped key
+    tunnel must not keep showing as up."""
+    from providers import happ
+
+    cache = tmp_path / "procs.json"
+    cache.write_text(json.dumps({"at": 9e18, "procs": ["xray-keys-vless"]}))
+    monkeypatch.setattr(happ, "PROCS_CACHE", cache)
+    monkeypatch.setattr(keys, "KEEPER_STATE_DIR", tmp_path)
+    monkeypatch.setattr(keys, "_daemon_running_processes", lambda fresh=False: ["xray-keys-vless"])
+    monkeypatch.setattr(keys, "_daemon_request", lambda action, **kw: {"status": "stopping"})
+    provider = keys.KeysProvider("vless")
+    if action == "disconnect":
+        provider.disconnect(keys.VPNConnection(name="K", provider=provider.name, active=True))
+    else:
+        monkeypatch.setattr(keys.time, "sleep", lambda s: None)
+        monkeypatch.setattr(keys.time, "time", iter([0.0, 99.0, 99.0]).__next__)
+        provider._stop_running()
+    assert not cache.exists()

@@ -12,6 +12,10 @@ from the git history.
 
 ### Added
 
+- **Progress for DNS Leak Test, Speed Test and IP Info:** one notification,
+  updated in place step by step, since the menu window can't change while a
+  tool runs. A `notify-send` without `-p` / `-r` shows the steps as separate
+  notifications instead.
 - **Happ: headless operation.** Subscriptions are fetched directly and turned
   into runnable xray configs, so every server can be listed and connected
   without the Happ GUI — through the `happd` daemon, with server switching,
@@ -52,7 +56,7 @@ from the git history.
   connection.
 - **`dns_mode` option** in `config.json` and the wizard: `"tunnel"` (default)
   always sends xray's DNS through the tunnel; `"subscription"` keeps the
-  subscription's own DNS routing.
+  subscription's own DNS routing ([#14]).
 
 ### Changed
 
@@ -60,7 +64,7 @@ from the git history.
   instead of the server's entry IP: most subscription servers enter through a
   Russian relay and exit abroad, which used to flag about half of them as
   leaks. 🇪🇺 accepts any EU member state, and a mismatch is cross-checked with a
-  second geo database before it is reported.
+  second geo database before it is reported ([#14]).
 - Menu and status markers are plain text. Reputation tags (RU / DC / PROXY) are
   no longer shown on server rows: nearly every VPN server is in a data centre.
 - The interface and documentation are English only ([#7]).
@@ -74,15 +78,29 @@ from the git history.
 
 ### Fixed
 
+- **Old Happ / Keys keepers never exited after a server switch** with Happ
+  4.5.2: its daemon no longer sends a "stopped" event, and the new tunnel
+  reuses the interface name, so every previous connection's keeper lingered
+  ("two connections at once"). Keepers now also exit as soon as a newer one
+  owns the connection.
+- **A disconnected tunnel kept showing as connected — under another server's
+  name.** For up to 3 s after a disconnect, a stale process list made the
+  plugin name the tunnel after the Happ GUI's last-used server, so Waybar
+  showed it and the menu's "↻" row reconnected *that* server. The cache is
+  now dropped on every connect / disconnect / switch, and the GUI's last
+  server only names a tunnel while the GUI itself is running.
+- **Failed tools now say why.** DNS Leak Test, Speed Test and IP Info used to
+  end with a generic "no network?"; the critical notification now names the
+  step and the cause (e.g. a TLS handshake timeout through a slow VPN exit).
 - **Headless Happ connect broke after updating to Happ 4.5.2:** its xray
   26.9.x rejects the outbound `proxySettings` field the generated config used,
   so xray never started ([#10]).
 - **DNS leak:** xray's resolver sent every lookup straight out of the real
   network interface from the real IP, whatever the tunnel ([#13]). Some
   subscriptions also route their own resolvers `direct`; in `"tunnel"` mode
-  that is now overridden.
+  that is now overridden ([#14]).
 - The IPv6 leak guard switched IPv6 **on** right after connecting, because it
-  re-checked the tunnel before xray had created its interface.
+  re-checked the tunnel before xray had created its interface ([#14]).
 - OpenVPN ignored DNS servers pushed by the server.
 - The Happ menu no longer blocks for up to 15 s on the network when a
   subscription cache is stale.
@@ -135,3 +153,4 @@ from the git history.
 [#10]: https://github.com/moonmouse11/waybar-vpn-manager/pull/10
 [#12]: https://github.com/moonmouse11/waybar-vpn-manager/pull/12
 [#13]: https://github.com/moonmouse11/waybar-vpn-manager/pull/13
+[#14]: https://github.com/moonmouse11/waybar-vpn-manager/pull/14

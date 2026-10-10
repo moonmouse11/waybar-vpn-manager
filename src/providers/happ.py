@@ -162,6 +162,14 @@ def _daemon_running_processes(fresh: bool = False) -> list[str]:
     return procs
 
 
+def _invalidate_procs_cache() -> None:
+    """Call after any change we make to happd's processes: the --status
+    tick's 3 s cache otherwise keeps reporting the old state (a stopped
+    xray-core 'still running' named a phantom connection)."""
+    with contextlib.suppress(OSError):
+        PROCS_CACHE.unlink(missing_ok=True)
+
+
 KEYS_PROCESS_PREFIX = "xray-keys-"
 
 
@@ -347,6 +355,50 @@ def _recv_frame(sock: socket.socket) -> dict | None:
         return None
 
 
+SIGTERM_EXIT = "15"  # happd's "finished" data for a process it was asked to stop
+
+
+def _hold_session(
+    sock, iface: str | None, process_id: str, owns_state, iface_exists=None
+) -> tuple[str, bool]:
+    """Wait on a keeper's happd session until its tunnel ends; returns
+    (reason, died). died=True only for an unexpected xray death — the one
+    case worth re-arming. A requested stop is never fought.
+
+    happd 4.5.2 changed the protocol: no {"event": "stopped"} any more, a
+    stop now reads {"event": "error", "data": "Process crashed"} then
+    {"event": "finished", "data": "15"} (SIGTERM), and a start under the
+    same process id silently replaces the old process — its owner gets no
+    event at all, and the new xray recreates the same TUN name. So
+    ownership of the keeper state file is checked on every idle tick: a
+    newer keeper (server switch) or a disconnect (state unlinked) ends this
+    one whatever happd says."""
+    iface_exists = iface_exists or _iface_exists
+    while True:
+        try:
+            frame = _recv_frame(sock)
+        except TimeoutError:
+            if not owns_state():
+                return "superseded (state owned by another keeper)", False
+            if iface and not iface_exists(iface):
+                return f"iface {iface} gone", True
+            continue
+        if not frame or frame.get("process-id", process_id) != process_id:
+            continue
+        event = frame.get("event")
+        if event == "stopped":  # happd < 4.5.2
+            return "happd sent stopped", False
+        if event == "finished":
+            if str(frame.get("data")) == SIGTERM_EXIT:
+                return "xray stopped on request (SIGTERM)", False
+            return f"xray exited on its own ({frame.get('data')})", True
+
+
+def _owns_keeper_state() -> bool:
+    current = _read_keeper_state()
+    return current is not None and current.get("pid") == os.getpid()
+
+
 def run_keeper(server_name: str | None = None, provider_id: str | None = None) -> None:
     """Long-lived happd session that owns the xray process.
 
@@ -439,22 +491,11 @@ def run_keeper(server_name: str | None = None, provider_id: str | None = None) -
 
                 # Hold the session open; exit when the tunnel disappears.
                 sock.settimeout(15)
-                exit_reason = "unknown"
-                while True:
-                    try:
-                        frame = _recv_frame(sock)
-                    except TimeoutError:
-                        if iface and not _iface_exists(iface):
-                            exit_reason = f"iface {iface} gone"
-                            break
-                        continue
-                    if frame and frame.get("event") == "stopped":
-                        exit_reason = "happd sent stopped"
-                        break
+                exit_reason, died = _hold_session(sock, iface, "xray-core", _owns_keeper_state)
             finally:
                 sock.close()
             logutil.log(f"keeper: tunnel ended: {exit_reason}")
-            if exit_reason != f"iface {iface} gone":
+            if not died:
                 break
             if attempts >= max_attempts:
                 notify_failure(
@@ -520,13 +561,26 @@ class HappProvider(VPNProvider):
             if state and state.get("status") == "connected":
                 active_name = state.get("server")
                 active_sub = state.get("provider_id")
-            if not active_name:
+            if not active_name and _gui_running():
+                # only a running GUI can own a tunnel we have no state for;
+                # otherwise its lastServerName names someone else's server
                 active_name = _last_server_name()
 
         # Exact match, or the unique substring match (GUI names can lack
         # the emoji prefix); ambiguous prefixes mark nothing.
         matched = happmeta.match_server(active_name, servers, active_sub) if active_name else None
         conns = []
+        if is_active and matched is None:
+            # up, but not ours to name: a neutral row — never a real server
+            # the "↻" reconnect row would then switch to
+            conns.append(
+                VPNConnection(
+                    name="Happ",
+                    provider=self.name,
+                    active=True,
+                    interface=interfaces[0] if interfaces else None,
+                )
+            )
         for server in servers:
             conn_active = server is matched  # identity, not name: names clash across subs
             conns.append(
@@ -605,6 +659,7 @@ class HappProvider(VPNProvider):
             return
         for process_id in processes:
             _daemon_request("stop", **{"process-id": process_id})
+        _invalidate_procs_cache()
         deadline = time.time() + 5
         while time.time() < deadline:
             if not _happ_interfaces():
@@ -628,6 +683,12 @@ class HappProvider(VPNProvider):
             start_new_session=True,
         )
         deadline = time.time() + 25  # happd can be slow to ack
+        try:
+            return self._await_keeper(deadline)
+        finally:
+            _invalidate_procs_cache()
+
+    def _await_keeper(self, deadline: float) -> ActionResult:
         while time.time() < deadline:
             state = _read_keeper_state()
             if state:
@@ -650,6 +711,7 @@ class HappProvider(VPNProvider):
             return ActionResult(success=False, message="Happ is not connected")
 
         stopped = []
+        _invalidate_procs_cache()
         for process_id in processes:
             resp = _daemon_request("stop", **{"process-id": process_id})
             if resp and resp.get("status") in ("stopping", "success"):
