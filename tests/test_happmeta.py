@@ -21,9 +21,9 @@ def test_parse_providers_reads_real_log(tmp_path, monkeypatch):
     log = tmp_path / "subscription_log.txt"
     log.write_text(
         "[05.08.2026 12:53:51] [UPDATE][INFO] "
-        "Subscription #479911144 starting update from: https://xskx.a.live/abc\n"
+        "Subscription #4242 starting update from: https://sub.example.net/abc\n"
         "[05.08.2026 12:53:52] [UPDATE][INFO] "
-        "🌺 ARTΞMIDA VPN fetching subscription from xskx.a.live\n"
+        "🌺 ARTΞMIDA VPN fetching subscription from sub.example.net\n"
         "[05.08.2026 12:53:53] [UPDATE][INFO] "
         "Subscription #7 starting update from: https://sub.com/123\n"
         "[05.08.2026 12:53:54] [UPDATE][INFO] "
@@ -36,9 +36,9 @@ def test_parse_providers_reads_real_log(tmp_path, monkeypatch):
 
     providers = happmeta._parse_providers()
     # name found via host fallback: the named url is the bare host of the url
-    assert providers["479911144"] == {
+    assert providers["4242"] == {
         "name": "🌺 ARTΞMIDA VPN",
-        "url": "https://xskx.a.live/abc",
+        "url": "https://sub.example.net/abc",
     }
     # same host fallback, name attached later in the log
     assert providers["7"] == {"name": "MyProv", "url": "https://sub.com/123"}
@@ -861,7 +861,7 @@ _HYSTERIA_BALANCER = {
         {
             "protocol": "hysteria",
             "tag": "DE-1",
-            "settings": {"address": "185.137.233.132", "port": 36106, "version": 2},
+            "settings": {"address": "203.0.113.10", "port": 36106, "version": 2},
             "streamSettings": {"network": "hysteria", "security": "tls"},
         },
         {
@@ -882,12 +882,12 @@ _HYSTERIA_BALANCER = {
 
 def test_outbound_target_understands_flat_settings_address():
     # hysteria (and other newer outbounds) keep address/port at settings' top level
-    assert happmeta._outbound_target(_HYSTERIA_BALANCER) == ("185.137.233.132", 36106)
+    assert happmeta._outbound_target(_HYSTERIA_BALANCER) == ("203.0.113.10", 36106)
 
 
 def test_server_endpoints_lists_every_balancer_member():
     assert happmeta.server_endpoints_of(_HYSTERIA_BALANCER) == [
-        ("185.137.233.132", 36106),
+        ("203.0.113.10", 36106),
         ("de2.example.com", 443),
     ]
 
@@ -1090,3 +1090,33 @@ def test_tunnel_dns_ignores_inbound_restricted_rules_as_catch_all():
     }
     cfg = happmeta.build_runtime_config(server_cfg)
     assert _dns_in_rules(cfg) == [{"inboundTag": ["dns-in"], "outboundTag": "proxy"}]
+
+
+def _runtime_balancers(balancers):
+    cfg = {"outbounds": [{"protocol": "vless", "tag": "a"}], "routing": {"balancers": balancers}}
+    return happmeta.build_runtime_config(cfg)["routing"]["balancers"]
+
+
+def test_balancer_strategy_written_as_settings_is_moved_to_strategy():
+    """xray ignores a balancer's "settings" key: leastPing written there ran as random."""
+    [b] = _runtime_balancers([{"tag": "E", "selector": ["a"], "settings": {"type": "leastPing"}}])
+    assert b == {"tag": "E", "selector": ["a"], "strategy": {"type": "leastPing"}}
+
+
+def test_balancer_settings_extras_become_strategy_settings():
+    [b] = _runtime_balancers(
+        [{"tag": "E", "selector": ["a"], "settings": {"type": "leastLoad", "maxRTT": "3s"}}]
+    )
+    assert b["strategy"] == {"type": "leastLoad", "settings": {"maxRTT": "3s"}}
+    assert "settings" not in b
+
+
+def test_a_real_balancer_strategy_is_left_alone():
+    real = {
+        "tag": "E",
+        "selector": ["a"],
+        "strategy": {"type": "random"},
+        "settings": {"type": "x"},
+    }
+    plain = {"tag": "F", "selector": ["a"]}
+    assert _runtime_balancers([dict(real), dict(plain)]) == [real, plain]

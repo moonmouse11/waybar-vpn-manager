@@ -192,19 +192,19 @@ def test_resume_for_happ_extra_ips_bypass_detect(monkeypatch, tmp_path):
         killswitch, "enable", lambda **kw: calls.append(kw) or ActionResult(True, "ok")
     )
     monkeypatch.setattr(killswitch, "is_enabled", lambda: True)
-    assert killswitch.resume_for_happ(extra_ips=["2.26.86.35"]).success
-    assert calls == [{"extra_ips": ["2.26.86.35"], "fresh": True}]
+    assert killswitch.resume_for_happ(extra_ips=["198.51.100.30"]).success
+    assert calls == [{"extra_ips": ["198.51.100.30"], "fresh": True}]
 
     monkeypatch.setattr(killswitch, "is_enabled", lambda: False)
     cfg = killswitch.config.load_config()
     cfg.killswitch_mode = "all"
     killswitch.config.save_config(cfg)
-    assert killswitch.resume_for_happ(extra_ips=["2.26.86.35"]).success
-    assert calls[-1] == {"extra_ips": ["2.26.86.35"], "fresh": True}
+    assert killswitch.resume_for_happ(extra_ips=["198.51.100.30"]).success
+    assert calls[-1] == {"extra_ips": ["198.51.100.30"], "fresh": True}
 
     cfg.killswitch_mode = "off"
     killswitch.config.save_config(cfg)
-    assert killswitch.resume_for_happ(extra_ips=["2.26.86.35"]) is None
+    assert killswitch.resume_for_happ(extra_ips=["198.51.100.30"]) is None
 
 
 def test_suspend_for_keeps_preference(monkeypatch, tmp_path):

@@ -6,7 +6,7 @@ records the full HTTP request (method, path, headers, body) to
 /tmp/happ-intercept/request.txt and answers 502.
 
 Usage:
-  sudo python3 scripts/sub-intercept-serve.py xskx.artemida.live
+  sudo python3 scripts/sub-intercept-serve.py <subscription host>
 """
 
 import os
@@ -19,7 +19,9 @@ WORKDIR = Path("/tmp/happ-intercept")
 
 
 def main() -> None:
-    domain = sys.argv[1] if len(sys.argv) > 1 else "xskx.artemida.live"
+    if len(sys.argv) != 2:
+        sys.exit("usage: sub-intercept-serve.py <subscription host>")
+    domain = sys.argv[1]
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(str(WORKDIR / "server.crt"), str(WORKDIR / "server.key"))

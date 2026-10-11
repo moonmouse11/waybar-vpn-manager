@@ -450,7 +450,7 @@ def test_happ_connect_passes_resolved_server_ip(monkeypatch, tmp_path):
     monkeypatch.setattr(
         vpn_manager.killswitch,
         "resolve_endpoint_ips",
-        lambda t: resolved.append(t) or ["2.26.86.35", "3.3.3.3"],
+        lambda t: resolved.append(t) or ["198.51.100.30", "3.3.3.3"],
     )
     calls = []
     monkeypatch.setattr(
@@ -467,7 +467,7 @@ def test_happ_connect_passes_resolved_server_ip(monkeypatch, tmp_path):
         "de2.example.com",
         "sub.example.ru",
     ]
-    assert calls == [["2.26.86.35", "3.3.3.3"]]
+    assert calls == [["198.51.100.30", "3.3.3.3"]]
 
 
 def test_walker_timeout_restarts_service(monkeypatch):
@@ -570,7 +570,7 @@ def test_no_vpn_row_shows_current_ip(monkeypatch):
     """Disconnected: the first row is the real public IP (not a VPN one)."""
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
     patch_menu_env(monkeypatch, [wg], picks=[])
-    monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda name, age: "Exit: 95.24.1.2 🇷🇺")
+    monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda name, age: "Exit: 192.0.2.50 🇷🇺")
     seen = []
     monkeypatch.setattr(
         vpn_manager,
@@ -578,7 +578,7 @@ def test_no_vpn_row_shows_current_ip(monkeypatch):
         lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.run_menu()
-    assert seen[0][0] == "● No VPN · 95.24.1.2 🇷🇺"
+    assert seen[0][0] == "● No VPN · 192.0.2.50 🇷🇺"
 
 
 def test_no_vpn_row_when_cache_stale_and_ip_disabled(monkeypatch):
@@ -937,9 +937,9 @@ def test_dns_leak_server_row_country_alone_is_not_a_leak():
     # a resolver in Russia is no more a leak than one anywhere else — only
     # the ASN/GEO checks against the exit IP decide
     row = vpn_manager._dns_leak_server_row(
-        {"ip": "172.69.50.15", "country": "ru", "org": "CloudFlare Inc"}
+        {"ip": "198.51.100.40", "country": "ru", "org": "CloudFlare Inc"}
     )
-    assert row[0] == "🇷🇺 172.69.50.15 · CloudFlare Inc"
+    assert row[0] == "🇷🇺 198.51.100.40 · CloudFlare Inc"
 
 
 def test_dns_leak_server_row_clean_no_warning():
@@ -1026,7 +1026,7 @@ def test_dns_leak_menu_own_verdict_flags_foreign_resolvers(monkeypatch):
         _leak_result(
             [
                 {"ip": "5.6.7.8", "country": "de", "asn": "AS3320 Telekom"},
-                {"ip": "172.69.50.15", "country": "nl", "asn": "AS13335 CloudFlare"},
+                {"ip": "198.51.100.40", "country": "nl", "asn": "AS13335 CloudFlare"},
             ]
         ),
         active=[_wg("de1")],
@@ -1038,7 +1038,7 @@ def test_dns_leak_menu_own_verdict_flags_foreign_resolvers(monkeypatch):
 def test_dns_leak_menu_own_verdict_clean(monkeypatch):
     seen = _dns_leak_menu_env(
         monkeypatch,
-        _leak_result([{"ip": "172.69.50.15", "country": "nl", "asn": "AS13335 CloudFlare"}]),
+        _leak_result([{"ip": "198.51.100.40", "country": "nl", "asn": "AS13335 CloudFlare"}]),
         active=[_wg("de1")],
     )
     vpn_manager.dns_leak_test_menu()
@@ -1115,7 +1115,7 @@ def test_dns_leak_test_menu_builds_result_rows(monkeypatch):
             "ip": "1.2.3.4",
             "ip_country": "DE",
             "dns_servers": [
-                {"ip": "172.69.50.15", "country": "ru", "org": "CloudFlare Inc"},
+                {"ip": "198.51.100.40", "country": "ru", "org": "CloudFlare Inc"},
                 {"ip": "9.9.9.9", "country": "de", "org": "Quad9"},
             ],
             "conclusion": "DNS may be leaking.",
@@ -1689,3 +1689,25 @@ def test_ip_info_failure_says_no_source_answered(monkeypatch):
     vpn_manager.ip_info_menu()
     kind, message = _FakeProgress.last.events[-1]
     assert kind == "fail" and "no IP source answered" in message
+
+
+def test_failure_hint_blames_the_killswitch_when_no_vpn_is_up(monkeypatch):
+    """killswitch_mode "all" keeps the rules after a disconnect: a tool run
+    then times out by design, and "the VPN exit may be slow" misleads."""
+    monkeypatch.setattr(vpn_manager, "active_connections", list)
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: True)
+    assert "killswitch blocks all traffic" in vpn_manager._failure_hint("timed out")
+
+
+def test_failure_hint_blames_a_slow_exit_for_a_timeout_through_a_tunnel(monkeypatch):
+    up = VPNConnection(name="de", provider="Happ", active=True)
+    monkeypatch.setattr(vpn_manager, "active_connections", lambda: [up])
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: True)
+    assert "exit may be slow" in vpn_manager._failure_hint("The read operation timed out")
+    assert vpn_manager._failure_hint("HTTP 502") == ""
+
+
+def test_failure_hint_without_vpn_and_killswitch_adds_nothing_to_a_plain_error(monkeypatch):
+    monkeypatch.setattr(vpn_manager, "active_connections", list)
+    monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
+    assert vpn_manager._failure_hint("HTTP 502") == ""

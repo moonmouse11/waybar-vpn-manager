@@ -548,8 +548,28 @@ def build_runtime_config(server_cfg: dict, tunnel_dns: bool = True) -> dict:
         *rules,
         CATCH_ALL_RULE,
     ]
+    for balancer in cfg["routing"].get("balancers") or []:
+        _normalize_balancer(balancer)
     cfg["log"] = {"loglevel": "info"}
     return cfg
+
+
+def _normalize_balancer(balancer: dict) -> None:
+    """Move a strategy written as `"settings": {"type": ...}` into `"strategy"`.
+
+    xray reads a balancer's strategy only from "strategy" and ignores an
+    unknown "settings" key without a word — so a subscription balancer
+    meant to be leastPing silently ran as random (seen live: one of 129
+    balancers across 5 subscriptions). A real "strategy" always wins."""
+    settings = balancer.get("settings")
+    if "strategy" in balancer or not isinstance(settings, dict) or "type" not in settings:
+        return
+    rest = dict(settings)
+    strategy = {"type": rest.pop("type")}
+    if rest:
+        strategy["settings"] = rest
+    balancer["strategy"] = strategy
+    del balancer["settings"]
 
 
 _CATCH_ALL_KEYS = {"type", "network", "ruleTag", "outboundTag", "balancerTag"}

@@ -23,9 +23,9 @@ binary). A headless connect therefore needs a long-lived keeper process that
 holds the socket open — see run_keeper() and the --happ-keeper entry point.
 
 Headless connect: the GUI builds an xray config in memory and sends it as
-"stdin-data" of a "start" frame. We replay captured configs instead — see
-docs/happd-protocol.md and scripts/happd-extract-config.py. Disconnect and
-status always work headless via happd.
+"stdin-data" of a "start" frame. We build the same from the subscription
+(happmeta.build_runtime_config()). Disconnect
+and status always work headless via happd.
 """
 
 import contextlib

@@ -14,6 +14,8 @@ import html
 import re
 import subprocess
 
+import logutil
+
 TITLE_MAXLEN = 100
 BODY_MAXLEN = 1000
 
@@ -103,6 +105,8 @@ class Progress:
         self._show(message, expire_ms=DONE_EXPIRE_MS)
 
     def fail(self, message: str) -> None:
+        # the reason used to live only in the bubble — unrecoverable afterwards
+        logutil.log(f"{self.title} failed: {message}")
         self._show(message, urgent=True)
 
     def _show(self, message: str, urgent: bool = False, expire_ms: int | None = None) -> None:
