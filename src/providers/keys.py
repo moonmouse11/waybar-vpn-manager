@@ -65,6 +65,7 @@ def _kind_meta(kind: str) -> tuple[str, str, Path]:
         KEEPER_STATE_DIR / f"keys-keeper-{kind}.json",
     )
 
+
 # xray 26 shadowsocks methods — AEAD only; the legacy stream ciphers
 # (aes-*-cfb/ctr, chacha20, salsa20, rc4-md5) were REMOVED from the core,
 # so OutlineKeys-style cfb keys are unusable on any modern core
@@ -301,7 +302,7 @@ def _save_servers(servers: list[dict]) -> None:
 def _server_id(server: dict) -> str:
     secret = server.get("password") or server.get("id") or ""
     raw = f"{server['kind']}:{server.get('method', '')}:{secret}@{server['host']}:{server['port']}"
-    return hashlib.sha1(raw.encode()).hexdigest()[:8]
+    return hashlib.sha1(raw.encode(), usedforsecurity=False).hexdigest()[:8]
 
 
 def add_server(parsed: dict) -> ActionResult:
@@ -517,9 +518,10 @@ def run_keeper(kind: str, server_id: str) -> None:
                     sock,
                     iface,
                     process_id,
-                    owns_state=lambda: (_read_keeper_state(state_path) or {}).get("pid")
-                    == os.getpid(),
-                    iface_exists=lambda name: _iface_exists(name),
+                    owns_state=lambda: (
+                        (_read_keeper_state(state_path) or {}).get("pid") == os.getpid()
+                    ),
+                    iface_exists=_iface_exists,
                 )
             finally:
                 sock.close()

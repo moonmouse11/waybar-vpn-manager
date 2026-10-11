@@ -49,7 +49,7 @@ def is_fresh(cache: dict | None, connection: str, max_age: int) -> bool:
 def status_line(connection: str, max_age: int) -> str | None:
     """Tooltip line like 'Exit: 144.31.166.213 🇩🇪', or None if stale/missing."""
     cache = read_cache()
-    if not is_fresh(cache, connection, max_age):
+    if cache is None or not is_fresh(cache, connection, max_age):
         return None
     line = f"Exit: {cache['ip']}"
     flag = flag_emoji(cache.get("country_code"))

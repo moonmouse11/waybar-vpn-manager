@@ -47,7 +47,7 @@ import notifyutil
 
 from .base import ActionResult, VPNConnection, VPNProvider
 
-HAPPD_SOCK = Path("/tmp/happd.sock")
+HAPPD_SOCK = Path("/tmp/happd.sock")  # noqa: S108 — happd's own path; see _sock_is_trusted()
 GUI_BIN = Path("/usr/bin/happ")
 GUI_CONFIG = Path.home() / ".config" / "Happ.conf"
 IFACE_PREFIX = "happ-"
@@ -63,13 +63,13 @@ PROCS_CACHE_TTL = 3.0  # seconds
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     output = (result.stdout + result.stderr).strip()
     return result.returncode, output
 
 
 def _sock_is_trusted(path: Path) -> bool:
-    """/tmp is world-writable: another local user could pre-create a path
+    """The temp dir is world-writable: another local user could pre-create a path
     there before happd starts (or replace it after) and have our client
     hand it whatever happd would normally see. Refuse anything that isn't
     an actual socket owned by us or root."""
@@ -250,6 +250,7 @@ def xray_config_error(cfg: dict, asset_dir: Path | None) -> str | None:
             text=True,
             env=env,
             timeout=XRAY_TEST_TIMEOUT,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -480,9 +481,7 @@ def run_keeper(server_name: str | None = None, provider_id: str | None = None) -
                     _write_own_keeper_state(state)
                     return
 
-                state.update(
-                    status="connected", server=cfg.get("remarks"), provider_id=provider_id
-                )
+                state.update(status="connected", server=cfg.get("remarks"), provider_id=provider_id)
                 _write_own_keeper_state(state)
                 logutil.log(
                     f"keeper: connected ({state['server']})"

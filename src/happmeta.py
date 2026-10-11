@@ -27,6 +27,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import fsutil
 
@@ -127,8 +128,9 @@ def _parse_providers() -> dict[str, dict]:
     # Newly added subscriptions log no id line — only this. The numeric id is
     # not available unencrypted (subs.db is AES-GCM), so synthesize a stable
     # id from the url; a later real id line for the same url always wins.
-    for m in re.finditer(r"Subscription being added: (\S+)", text):
-        added_urls.append((m.start(), m.group(1)))
+    added_urls.extend(
+        (m.start(), m.group(1)) for m in re.finditer(r"Subscription being added: (\S+)", text)
+    )
     # Atomic group around the repeated "[...]" prefix: once it has consumed
     # N bracket groups it commits to that count instead of retrying N-1,
     # N-2, ... against the trailing ".+?" when "fetching subscription from"
@@ -189,7 +191,7 @@ def _parse_providers() -> dict[str, dict]:
     for sub_id, url in id_url.items():
         providers[sub_id] = {"name": _resolve_name(url, f"Subscription {sub_id}"), "url": url}
     for host, url in synth.items():
-        sub_id = "h" + hashlib.sha1(url.encode()).hexdigest()[:10]
+        sub_id = "h" + hashlib.sha1(url.encode(), usedforsecurity=False).hexdigest()[:10]
         providers[sub_id] = {"name": _resolve_name(url, host), "url": url}
 
     # Fallback names from routing.json (routing names per subscription)
@@ -285,10 +287,11 @@ def fetch_subscription(sub_id: str, url: str, force: bool = False) -> list[dict]
         return cached.get("servers", [])
 
     headers = _headers()
-    if headers:
-        req = urllib.request.Request(url, headers=headers)
+    # the url comes from Happ's log: never let it open file:// or other schemes
+    if headers and url.startswith(("https://", "http://")):
+        req = urllib.request.Request(url, headers=headers)  # noqa: S310 — scheme checked
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 — scheme checked
                 data = json.loads(resp.read().decode())
                 info = _parse_sub_info(resp)  # headers only readable while open
             if isinstance(data, list) and data and isinstance(data[0], dict):
@@ -337,7 +340,7 @@ def _parse_sub_info(resp) -> dict | None:
         title = title.strip()
         if title.startswith("base64:"):
             try:
-                title = base64.b64decode(title[len("base64:"):]).decode("utf-8", errors="replace")
+                title = base64.b64decode(title[len("base64:") :]).decode("utf-8", errors="replace")
             except (ValueError, TypeError):
                 title = None
         info["title"] = title or None
@@ -545,8 +548,11 @@ def _tunnel_target(rules: list[dict], outbounds: list[dict]) -> dict:
     freedom = {o.get("tag") for o in outbounds if o.get("protocol") == "freedom"}
     if target.get("outboundTag") in freedom:
         proxy = next(
-            (o["tag"] for o in outbounds
-             if o.get("tag") and o.get("protocol") not in NON_PROXY_PROTOCOLS),
+            (
+                o["tag"]
+                for o in outbounds
+                if o.get("tag") and o.get("protocol") not in NON_PROXY_PROTOCOLS
+            ),
             None,
         )
         if proxy:
@@ -871,7 +877,7 @@ def ping_targets() -> list[tuple[str, str, int]]:
 
 def write_pings(targets: list[tuple[str, str, int]]) -> None:
     """Measure and write the ping cache (single writer, fixed format)."""
-    pings: dict[str, dict] = {}
+    pings: dict[str, Any] = {}  # name -> {ms, at}, plus updated_at
     for name, host, port in targets:
         try:
             ms = measure_ping(host, port)

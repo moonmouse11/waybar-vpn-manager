@@ -115,7 +115,6 @@ def test_progress_survives_missing_notify_send_and_garbage_ids(monkeypatch):
     assert "-r" not in ns.calls[1]  # no usable id -> a fresh bubble, never a crash
 
 
-
 def test_progress_falls_back_when_notify_send_rejects_print_id(monkeypatch):
     """A notify-send without -p/-r exits on the unknown option and shows
     nothing — progress (incl. the final critical reason) must still show up,

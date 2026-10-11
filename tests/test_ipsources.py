@@ -20,9 +20,7 @@ class _Resp:
 
 
 def test_fetch_json_happy_path(monkeypatch):
-    monkeypatch.setattr(
-        base.urllib.request, "urlopen", lambda req, timeout=8: _Resp({"ok": True})
-    )
+    monkeypatch.setattr(base.urllib.request, "urlopen", lambda req, timeout=8: _Resp({"ok": True}))
     assert base.fetch_json("https://example.com") == {"ok": True}
 
 

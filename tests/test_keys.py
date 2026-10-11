@@ -77,7 +77,9 @@ def test_parse_vless_rejects():
     with pytest.raises(ValueError, match="UUID"):
         keys.parse_vless_key("vless://not-a-uuid@h.com:443")
     with pytest.raises(ValueError, match="pbk"):
-        keys.parse_vless_key("vless://3874802c-d7fb-43e3-aeed-d4413fe444b2@h.com:443?security=reality")
+        keys.parse_vless_key(
+            "vless://3874802c-d7fb-43e3-aeed-d4413fe444b2@h.com:443?security=reality"
+        )
     with pytest.raises(ValueError, match="transport"):
         keys.parse_vless_key("vless://3874802c-d7fb-43e3-aeed-d4413fe444b2@h.com:443?type=quic")
 
@@ -99,9 +101,7 @@ def test_vless_outbound_structure():
 
 def test_parse_key_dispatch():
     assert keys.parse_key(ss_url())["kind"] == "ss"
-    assert (
-        keys.parse_key("vless://3874802c-d7fb-43e3-aeed-d4413fe444b2@h.com:1")["kind"] == "vless"
-    )
+    assert keys.parse_key("vless://3874802c-d7fb-43e3-aeed-d4413fe444b2@h.com:1")["kind"] == "vless"
     import pytest
 
     with pytest.raises(ValueError, match="scheme"):
@@ -121,8 +121,12 @@ def test_parse_sip002_standard_b64_alphabet_and_padding():
 def test_parse_legacy_json_form():
     payload = base64.b64encode(
         json.dumps(
-            {"server": "legacy.example.com", "server_port": 9999,
-             "method": "aes-128-gcm", "password": "pw"}
+            {
+                "server": "legacy.example.com",
+                "server_port": 9999,
+                "method": "aes-128-gcm",
+                "password": "pw",
+            }
         ).encode()
     ).decode()
     parsed = keys.parse_ss_key(f"ss://{payload}#old")
@@ -315,7 +319,6 @@ def test_keeper_exits_on_happd_452_requested_stop(tmp_path, monkeypatch):
     assert len(socks) == 1  # exited, never re-armed
     final = json.loads((tmp_path / "keys-keeper-vless.json").read_text())
     assert final["status"] == "exited"
-
 
 
 @pytest.mark.parametrize("action", ["disconnect", "_stop_running"])

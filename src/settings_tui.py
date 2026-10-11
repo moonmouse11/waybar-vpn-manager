@@ -20,6 +20,7 @@ import locale
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import config
 import ipsources
@@ -39,7 +40,7 @@ class Row:
     text: str
     kind: str  # header | toggle | key
     change: Callable[[config.Config], None] | None = None  # toggle: edits the draft
-    source: object = None  # key: the ipsources source whose API key it edits
+    source: Any = None  # key: the ipsources source whose API key it edits
 
     @property
     def selectable(self) -> bool:
@@ -178,7 +179,7 @@ class SettingsState:
         """Space/Enter on the current row. Toggles act at once and return
         None; "key" asks the caller for input (then set_api_key)."""
         row = self.current
-        if row.kind == "toggle":
+        if row.kind == "toggle" and row.change is not None:
             row.change(self.draft)
             return None
         return "key" if row.kind == "key" else None

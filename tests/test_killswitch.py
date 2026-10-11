@@ -137,8 +137,10 @@ def test_enable_all_mode_tolerates_detect_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(
         killswitch,
         "_sudo",
-        lambda *args: calls.append(args)
-        or ActionResult(args[0] != "detect", "ok" if args[0] != "detect" else "no happ"),
+        lambda *args: (
+            calls.append(args)
+            or ActionResult(args[0] != "detect", "ok" if args[0] != "detect" else "no happ")
+        ),
     )
 
     assert killswitch.enable(extra_ips=["1.2.3.4"]).success
@@ -236,9 +238,7 @@ def test_enable_fresh_skips_detect_and_saved_ips(monkeypatch):
     physical NIC — direct-routed sites included) and no merging of the saved
     conf (IPs of whatever server was detected last time)."""
     calls = []
-    monkeypatch.setattr(
-        killswitch, "_sudo", lambda *a: calls.append(a) or ActionResult(True, "ok")
-    )
+    monkeypatch.setattr(killswitch, "_sudo", lambda *a: calls.append(a) or ActionResult(True, "ok"))
     assert killswitch.enable(extra_ips=["1.2.3.4"], fresh=True).success
     assert calls == [("on", "--no-conf", "1.2.3.4")]
 

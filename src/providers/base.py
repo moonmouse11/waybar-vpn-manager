@@ -27,6 +27,7 @@ def read_config_text(path) -> str | None:
             text=True,
             errors="replace",
             timeout=10,
+            check=False,
         )
         if result.returncode == 0:
             return result.stdout
@@ -91,6 +92,7 @@ def _iface_counters(iface: str) -> tuple[int, int] | None:
         ["ip", "-s", "link", "show", "dev", iface],
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         return None

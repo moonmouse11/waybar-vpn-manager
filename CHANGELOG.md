@@ -76,6 +76,10 @@ from the git history.
   no longer shown on server rows: nearly every VPN server is in a data centre.
 - The interface and documentation are English only ([#7]).
 - CI: `actions/checkout` 7.0.1 ([#2]), `sonarqube-scan-action` 8.2.2 ([#1]).
+- Stricter checks: more Ruff rule sets (pylint, bandit, pathlib, perf…),
+  `ruff format --check` and `mypy` in CI and `make lint`. The test image and
+  the Sonar / xray-compat jobs run on Python 3.14, what Arch ships; 3.11–3.14
+  stay tested.
 
 ### Removed
 
@@ -85,6 +89,12 @@ from the git history.
 
 ### Fixed
 
+- Leaving the Happ menu ended the menu process with an error: the Happ
+  submenu returned nothing where an action result was expected (found by the
+  new type check).
+- A subscription URL read from Happ's log is only fetched over `http(s)://`.
+- `make test-docker-build` could hang forever on a stalled xray download; it
+  now times out and retries.
 - **Old Happ / Keys keepers never exited after a server switch** with Happ
   4.5.2: its daemon no longer sends a "stopped" event, and the new tunnel
   reuses the interface name, so every previous connection's keeper lingered

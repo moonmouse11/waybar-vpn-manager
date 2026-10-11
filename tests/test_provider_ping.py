@@ -217,15 +217,17 @@ def test_write_pings_combined_targets(tmp_path, monkeypatch):
         return 7.0 if port != 9 else None
 
     monkeypatch.setattr(happmeta, "measure_ping", fake_measure)
-    targets = [("srv-happ", "h.example.com", 443), ("wg", "w.example.com", 51820),
-               ("dead", "127.0.0.1", 9)]
+    targets = [
+        ("srv-happ", "h.example.com", 443),
+        ("wg", "w.example.com", 51820),
+        ("dead", "127.0.0.1", 9),
+    ]
     happmeta.write_pings(targets)
     data = json.loads(ping_file.read_text())
     assert data["srv-happ"] == {"ms": 7.0, "at": data["srv-happ"]["at"]}
     assert data["wg"]["ms"] == 7.0
     assert data["dead"]["ms"] is None  # failure recorded for the ⛔ mark
-    assert set(measured) == {("h.example.com", 443), ("w.example.com", 51820),
-                             ("127.0.0.1", 9)}
+    assert set(measured) == {("h.example.com", 443), ("w.example.com", 51820), ("127.0.0.1", 9)}
     assert time.time() - data["updated_at"] < 5
 
 
@@ -259,7 +261,7 @@ def test_provider_menu_labels_show_ping(monkeypatch, tmp_path):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.provider_menu(wg)
     options = seen[0]

@@ -12,8 +12,9 @@ class FakeProvider:
         return self._conns
 
 
-def patch_env(monkeypatch, providers, cfg=None, traffic="↓ 1 MiB  ↑ 2 MiB",
-              rate="↓ 3 KiB/s ↑ 4 KiB/s"):
+def patch_env(
+    monkeypatch, providers, cfg=None, traffic="↓ 1 MiB  ↑ 2 MiB", rate="↓ 3 KiB/s ↑ 4 KiB/s"
+):
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", providers)
     monkeypatch.setattr(vpn_manager.config, "load_config", lambda: cfg or config.Config())
     monkeypatch.setattr(vpn_manager, "iface_traffic", lambda iface: traffic)

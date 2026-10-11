@@ -9,7 +9,7 @@ DNS_UPDOWN = "/usr/local/bin/openvpn-dns-updown"
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     output = (result.stdout + result.stderr).strip()
     return result.returncode, output
 
@@ -58,7 +58,7 @@ class OpenVPNProvider(VPNProvider):
         return "OpenVPN"
 
     def connections(self) -> list[VPNConnection]:
-        result = []
+        result: list[VPNConnection] = []
 
         if not OVPN_DIR.exists():
             return result

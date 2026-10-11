@@ -8,7 +8,7 @@ import dnsleak
 def test_run_happy_path(monkeypatch):
     monkeypatch.setattr(dnsleak, "_get_test_id", lambda: "abc123")
     probed = []
-    monkeypatch.setattr(dnsleak, "_send_probes", lambda test_id: probed.append(test_id))
+    monkeypatch.setattr(dnsleak, "_send_probes", probed.append)
     entries = [
         {"type": "ip", "ip": "1.2.3.4", "country": "de"},
         {
@@ -119,7 +119,7 @@ def test_send_probes_covers_every_host(monkeypatch):
     # set, not a list; only full coverage of every host matters here.
     monkeypatch.setattr(dnsleak, "PROBE_COUNT", 5)
     seen = []
-    monkeypatch.setattr(dnsleak, "_probe", lambda host: seen.append(host))
+    monkeypatch.setattr(dnsleak, "_probe", seen.append)
     dnsleak._send_probes("tid")
     assert set(seen) == {f"{i}.tid.bash.ws" for i in range(1, 6)}
 

@@ -30,8 +30,8 @@ def write_json_atomic(path: Path, data, *, mode: int = 0o600, **dump_kw) -> None
             if mode != 0o600:
                 os.fchmod(f.fileno(), mode)
             json.dump(data, f, **dump_kw)
-        os.replace(tmp_name, path)
+        Path(tmp_name).replace(path)
     except BaseException:
         with contextlib.suppress(OSError):  # keep the original exception
-            os.unlink(tmp_name)
+            Path(tmp_name).unlink()
         raise

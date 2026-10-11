@@ -31,8 +31,8 @@ XRAY_DIR = Path(os.environ.get("XRAY_COMPAT_DIR", "/opt/xray"))
 ASSETS = XRAY_DIR / "assets"
 VERSIONS = sorted(p.parent.name for p in XRAY_DIR.glob("*/xray"))
 # Captured at import, before conftest's autouse fixtures replace
-# subprocess.run (_no_real_sysctl) and subprocess.Popen
-# (_no_real_reputation_subprocess) — those patches land on the shared
+# subprocess.run (via _no_real_sysctl) and subprocess.Popen
+# (via _no_real_reputation_subprocess) — those patches land on the shared
 # `subprocess` module, so without restoring them every xray call here
 # "succeeds" (run -> fake rc 0) or crashes (Popen -> None) without running.
 _REAL_RUN = subprocess.run
@@ -142,6 +142,7 @@ _HYSTERIA_BALANCER = {
         "rules": [{"balancerTag": "auto", "network": "tcp,udp", "type": "field"}],
     },
 }
+
 
 def _vless(tag: str, address: str, flow: str = "xtls-rprx-vision") -> dict:
     """vless+tcp+reality — the most common outbound across real subscriptions."""
@@ -482,20 +483,30 @@ def _routing_log(server: dict, want: dict[str, str], tunnel_dns: bool = True) ->
     cfg = happmeta.build_runtime_config(server, tunnel_dns=tunnel_dns)
     port = _free_port()
     cfg["inbounds"] = [
-        {"tag": "tun-in", "protocol": "socks", "listen": "127.0.0.1", "port": port,
-         "settings": {"udp": True}}
+        {
+            "tag": "tun-in",
+            "protocol": "socks",
+            "listen": "127.0.0.1",
+            "port": port,
+            "settings": {"udp": True},
+        }
     ]
     cfg["log"] = {"loglevel": "debug"}
     proxy = next(o for o in cfg["outbounds"] if o.get("tag") == "proxy")
     proxy["streamSettings"]["sockopt"]["domainStrategy"] = "UseIPv4"
-    cfg["outbounds"].append({"tag": "app", "protocol": "freedom",
-                             "settings": {"domainStrategy": "UseIPv4"}})
+    cfg["outbounds"].append(
+        {"tag": "app", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}}
+    )
     cfg["routing"]["rules"].insert(0, {"domain": ["full:app.example.net"], "outboundTag": "app"})
 
     env = {**os.environ, "XRAY_LOCATION_ASSET": str(ASSETS)}
     proc = subprocess.Popen(
-        [str(happ.XRAY_BIN), "run", "-c", "stdin:"], stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+        [str(happ.XRAY_BIN), "run", "-c", "stdin:"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
     )
     lines: list[str] = []
     reader = threading.Thread(target=lambda: lines.extend(proc.stdout), daemon=True)
@@ -528,10 +539,13 @@ def test_app_dns_tunnels_and_only_server_bootstrap_goes_direct(xray):
     resolver = "8.8.8.8"
     server = copy.deepcopy(_VLESS_REALITY_XHTTP)  # server address: de.example.com
     server["dns"] = {"servers": [resolver]}
-    _routing_log(server, {
-        "tunneled": f"taking detour [proxy] for [udp:{resolver}:53]",
-        "bootstrap": f"taking detour [dns-direct] for [udp:{resolver}:53]",
-    })
+    _routing_log(
+        server,
+        {
+            "tunneled": f"taking detour [proxy] for [udp:{resolver}:53]",
+            "bootstrap": f"taking detour [dns-direct] for [udp:{resolver}:53]",
+        },
+    )
 
 
 def _with_dns_direct_rule(resolver: str) -> dict:
@@ -548,15 +562,22 @@ def test_tunnel_dns_mode_beats_a_subscription_rule_pinning_dns_direct(xray):
     """Germany 1 (ARTΞMIDA) still leaked after #13: its DNS_DIRECT rule sent
     1.1.1.1 lookups out the real NIC. dns_mode "tunnel" must override it."""
     resolver = "8.8.8.8"
-    log = _routing_log(_with_dns_direct_rule(resolver), {
-        "tunneled": f"taking detour [proxy] for [udp:{resolver}:53]",
-    })
+    log = _routing_log(
+        _with_dns_direct_rule(resolver),
+        {
+            "tunneled": f"taking detour [proxy] for [udp:{resolver}:53]",
+        },
+    )
     assert "Hit route rule: [DNS_DIRECT]" not in log
 
 
 def test_subscription_dns_mode_keeps_the_providers_direct_dns(xray):
     resolver = "8.8.8.8"
-    _routing_log(_with_dns_direct_rule(resolver), {
-        "provider's choice": f"Hit route rule: [DNS_DIRECT] so taking detour [direct] for "
-        f"[udp:{resolver}:53]",
-    }, tunnel_dns=False)
+    _routing_log(
+        _with_dns_direct_rule(resolver),
+        {
+            "provider's choice": f"Hit route rule: [DNS_DIRECT] so taking detour [direct] for "
+            f"[udp:{resolver}:53]",
+        },
+        tunnel_dns=False,
+    )

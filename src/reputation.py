@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import fsutil
 import ipsources
@@ -201,7 +202,7 @@ def write_reputations(targets: list[tuple[str, str, int]]) -> None:
     free-tier rate limit — this only runs in the background, once a day,
     so the extra time doesn't matter."""
     by_host: dict[str, list[IPFinding]] = {}
-    entries: dict[str, dict] = {}
+    entries: dict[str, Any] = {}  # name -> entry, plus updated_at
     for name, host, _port in targets:
         if host not in by_host:
             try:

@@ -62,10 +62,10 @@ def measure(url: str, duration: float = DURATION) -> Measurement:
 
     The clock starts once the response headers arrive, so DNS/TLS setup
     and time-to-first-byte don't drag the figure down."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})  # noqa: S310 — see below
     n = 0
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # noqa: S310 — is_valid_url() on input
             t0 = time.perf_counter()
             dt = 0.0
             while dt < duration:

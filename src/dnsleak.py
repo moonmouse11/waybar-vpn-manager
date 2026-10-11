@@ -51,6 +51,7 @@ def _describe(e: Exception) -> str:
         return text.split(": ", 1)[-1] if text.startswith("_ssl.c") else text
     return str(e) or type(e).__name__
 
+
 # Public anycast resolvers — their egress can sit in any country near the
 # tunnel exit, so answering from one of these is never a leak on its own.
 NEUTRAL_ASNS = {
