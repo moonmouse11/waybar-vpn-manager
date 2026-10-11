@@ -11,11 +11,16 @@ import contextlib
 import json
 import threading
 import time
-import urllib.request
+import urllib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import fsutil
+import lazyimports  # noqa: F401 — registers urllib.request & co. to load on first use
 import logutil
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import urllib.request
 
 CACHE_PATH = Path.home() / ".cache" / "vpn-manager" / "exit_ip.json"
 # ipwho.is gives IP + country in one request; ifconfig.me is the plain-IP fallback

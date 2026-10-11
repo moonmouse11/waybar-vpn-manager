@@ -60,6 +60,9 @@ from the git history.
 
 ### Changed
 
+- `--status`, which Waybar runs every 3 s, is ~17% faster: the network stack
+  (urllib, http.client, ssl) loads only when a tool actually uses it, and each
+  Happ subscription cache is parsed once per run instead of twice.
 - **⚙ Settings is one list** in a small floating terminal instead of a chain
   of Yes / No windows, keyboard-driven like omarchy's own TUIs: every setting
   is a row showing its value (✅ / ⬜), Space / Enter changes it in place, `s`
@@ -89,6 +92,10 @@ from the git history.
 
 ### Fixed
 
+- Imported VLESS / Shadowsocks keys were identified by a truncated SHA-1 of
+  the key's password or UUID, passed on the keeper's command line where any
+  local user can read it with `ps`. Keys now get a random id; keys imported
+  earlier get one on their next connect (reconnect once after updating).
 - Leaving the Happ menu ended the menu process with an error: the Happ
   submenu returned nothing where an action result was expected (found by the
   new type check).

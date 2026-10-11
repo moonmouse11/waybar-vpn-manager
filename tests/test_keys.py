@@ -272,10 +272,9 @@ def test_import_config_surfaces_parser_reason(store, tmp_path):
 
 
 def test_keeper_rejected_config_is_an_error_and_never_started(tmp_path, monkeypatch):
-    server = {"name": "K", "kind": "vless"}
+    server = {"name": "K", "kind": "vless", "uid": "id1"}
     monkeypatch.setattr(keys, "KEEPER_STATE_DIR", tmp_path)
     monkeypatch.setattr(keys, "_load_servers", lambda: [server])
-    monkeypatch.setattr(keys, "_server_id", lambda s: "id1")
     monkeypatch.setattr(keys, "_build_xray_config", lambda s: {"outbounds": []})
     monkeypatch.setattr(keys, "_routing_asset_dir", lambda: None)
     monkeypatch.setattr(keys, "xray_config_error", lambda cfg, asset_dir: "bad field")
@@ -305,8 +304,9 @@ def test_keeper_exits_on_happd_452_requested_stop(tmp_path, monkeypatch):
         return socks[-1]
 
     monkeypatch.setattr(keys, "KEEPER_STATE_DIR", tmp_path)
-    monkeypatch.setattr(keys, "_load_servers", lambda: [{"name": "K", "kind": "vless"}])
-    monkeypatch.setattr(keys, "_server_id", lambda s: "id1")
+    monkeypatch.setattr(
+        keys, "_load_servers", lambda: [{"name": "K", "kind": "vless", "uid": "id1"}]
+    )
     monkeypatch.setattr(keys, "_build_xray_config", lambda s: {"outbounds": []})
     monkeypatch.setattr(keys, "_routing_asset_dir", lambda: None)
     monkeypatch.setattr(keys, "xray_config_error", lambda cfg, asset_dir: None)
@@ -341,3 +341,56 @@ def test_keys_drop_the_process_list_cache_when_changing_happd(tmp_path, monkeypa
         monkeypatch.setattr(keys.time, "time", iter([0.0, 99.0, 99.0]).__next__)
         provider._stop_running()
     assert not cache.exists()
+
+
+def test_uid_is_random_not_derived_from_the_secret(store):
+    """The keeper gets the uid on its argv (visible in `ps` to every local
+    user) — it must carry nothing about the key's password/UUID."""
+    a = {
+        "kind": "ss",
+        "method": "aes-256-gcm",
+        "password": "pw",
+        "host": "h",
+        "port": 1,
+        "name": "A",
+    }
+    b = dict(a, name="B", host="h2")
+    assert keys.add_server(dict(a)).success
+    assert keys.add_server(dict(b)).success
+    uids = [s["uid"] for s in keys._load_servers()]
+    assert len(set(uids)) == 2
+    assert all(len(u) == 8 and "pw" not in u for u in uids)
+
+
+def test_identical_key_still_dedupes_without_a_hash(store):
+    a = {
+        "kind": "ss",
+        "method": "aes-256-gcm",
+        "password": "pw",
+        "host": "h",
+        "port": 1,
+        "name": "A",
+    }
+    assert keys.add_server(dict(a)).success
+    again = keys.add_server(dict(a, name="Other name"))
+    assert not again.success
+    assert "Already imported" in again.message
+
+
+def test_legacy_keys_get_a_uid_on_connect_not_on_status(store, monkeypatch):
+    legacy = {"kind": "ss", "method": "m", "password": "pw", "host": "h", "port": 1, "name": "Old"}
+    keys._save_servers([legacy])
+    provider = keys.KeysProvider("ss")
+    monkeypatch.setattr(keys, "_daemon_running_processes", lambda fresh=False: set())
+    provider.connections()  # the --status path
+    assert "uid" not in keys._load_servers()[0]
+    started = []
+    monkeypatch.setattr(provider, "_stop_running", lambda: None)
+    monkeypatch.setattr(
+        provider,
+        "_headless_connect",
+        lambda uid: started.append(uid) or keys.ActionResult(True, ""),
+    )
+    provider.connect(keys.VPNConnection(name="Old", provider=provider.name, active=False))
+    uid = keys._load_servers()[0]["uid"]
+    assert started == [uid]

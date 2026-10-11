@@ -8,13 +8,19 @@ nginx, where no public service is reachable). The download is capped at
 DURATION seconds, so file size only needs to be "big enough".
 """
 
-import http.client
+import http
 import time
-import urllib.request
+import urllib
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+import lazyimports  # noqa: F401 — registers urllib.request & co. to load on first use
 import logutil
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import http.client
+    import urllib.request
 
 DURATION = 10.0  # seconds of transfer to average over
 TIMEOUT = 15  # per socket operation (connect / each read)

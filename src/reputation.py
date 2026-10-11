@@ -23,13 +23,17 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
+import urllib
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import fsutil
 import ipsources
+import lazyimports  # noqa: F401 — registers urllib.request & co. to load on first use
 from ipsources.base import IPFinding, fetch_json
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import urllib.request
 
 CACHE = Path.home() / ".cache/vpn-manager/reputation.json"
 MAX_AGE = 24 * 3600  # a day — registration data doesn't change hour to hour

@@ -19,17 +19,19 @@ import ipaddress
 import json
 import re
 import socket
-import statistics
 import subprocess
 import sys
 import time
 import urllib.parse
-import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import fsutil
+from lazyimports import statistics  # also registers urllib.request & co. lazily
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import urllib.request
 
 LOG_FILE = Path.home() / ".local/share/Happ/logs/subscription_log.txt"
 ROUTING_FILE = Path.home() / ".config/Happ/routing.json"
@@ -388,25 +390,45 @@ def fmt_expire(epoch: int | None) -> str:
         return "?"
 
 
+# path -> ((inode, mtime_ns, size), parsed). One --status run read every
+# subscription cache (~1 MB of JSON) twice — freshness check, then the server
+# list — ~40 ms of a 3-second tick. Writes go through os.replace, so a new
+# file always has a new inode and a stale entry can't match.
+_SUB_CACHE_MEMO: dict[Path, tuple[tuple[int, int, int], object]] = {}
+
+
+def _read_sub_cache(sub_id: str) -> object:
+    """Parsed subscription cache file, or None if missing/unreadable."""
+    path = _sub_cache_path(sub_id)
+    try:
+        st = path.stat()
+        key = (st.st_ino, st.st_mtime_ns, st.st_size)
+        memo = _SUB_CACHE_MEMO.get(path)
+        if memo and memo[0] == key:
+            return memo[1]
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    _SUB_CACHE_MEMO[path] = (key, data)
+    return data
+
+
 def fetch_subscription_cached(sub_id: str) -> list[dict]:
     """Cache-only read: fresh or stale servers, never touches the network.
     Used on the waybar --status path so a 3 s tick never blocks on I/O."""
-    try:
-        cached = json.loads(_sub_cache_path(sub_id).read_text())
-    except (OSError, json.JSONDecodeError):
-        return []
+    cached = _read_sub_cache(sub_id)
     return cached.get("servers", []) if isinstance(cached, dict) else []
 
 
 def _sub_cache_fresh(sub_id: str, url: str) -> bool:
+    cached = _read_sub_cache(sub_id)
     try:
-        cached = json.loads(_sub_cache_path(sub_id).read_text())
         return (
             isinstance(cached, dict)
             and cached.get("url", url) == url  # legacy records without url match
             and time.time() - cached.get("at", 0) < SUB_MAX_AGE
         )
-    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+    except (AttributeError, TypeError):
         return False
 
 

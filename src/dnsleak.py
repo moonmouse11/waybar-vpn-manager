@@ -13,13 +13,19 @@ public IP), "dns" (each detected resolver), "conclusion" (bash.ws's own
 verdict text).
 """
 
-import concurrent.futures
+import concurrent
 import contextlib
 import json
 import re
 import socket
 import urllib.error
-import urllib.request
+from typing import TYPE_CHECKING
+
+import lazyimports  # noqa: F401 — registers urllib.request & co. to load on first use
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import concurrent.futures
+    import urllib.request
 
 API = "bash.ws"
 PROBE_COUNT = 30
