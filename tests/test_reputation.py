@@ -10,16 +10,12 @@ def test_reason_tags_order_and_combination():
     assert reputation._reason_tags({"country_code": "RU"}) == ["RU"]
     assert reputation._reason_tags({"hosting": True}) == ["DC"]
     assert reputation._reason_tags({"proxy": True}) == ["PROXY"]
-    assert reputation._reason_tags(
-        {"country_code": "RU", "hosting": True, "proxy": True}
-    ) == ["RU", "DC", "PROXY"]
+    assert reputation._reason_tags({"country_code": "RU", "hosting": True, "proxy": True}) == [
+        "RU",
+        "DC",
+        "PROXY",
+    ]
     assert reputation._reason_tags({}) == []
-
-
-
-
-
-
 
 
 def test_request_update_throttles(tmp_path, monkeypatch):
@@ -197,7 +193,7 @@ def test_detect_own_ip_skips_ipwho_when_source_disabled(monkeypatch, tmp_path):
 
     def fake_fetch(url, timeout=6):
         calls.append(url)
-        return None
+        return
 
     monkeypatch.setattr(reputation, "fetch_json", fake_fetch)
 
@@ -290,7 +286,7 @@ def test_write_reputations_paces_between_lookups(tmp_path, monkeypatch):
         reputation, "lookup_host", lambda host, include_keyed: [IPFinding(source="X")]
     )
     slept = []
-    monkeypatch.setattr(reputation.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(reputation.time, "sleep", slept.append)
     reputation.write_reputations([("a", "host-a", 443), ("b", "host-b", 443)])
     assert slept == [42, 42]  # once per unique host looked up
 

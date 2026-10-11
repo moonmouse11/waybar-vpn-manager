@@ -9,7 +9,7 @@ import fsutil
 
 
 def _mode(path) -> int:
-    return stat.S_IMODE(os.stat(path).st_mode)
+    return stat.S_IMODE(Path(path).stat().st_mode)
 
 
 def test_writes_json_with_0600(tmp_path):

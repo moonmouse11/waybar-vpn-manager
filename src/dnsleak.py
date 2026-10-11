@@ -13,13 +13,19 @@ public IP), "dns" (each detected resolver), "conclusion" (bash.ws's own
 verdict text).
 """
 
-import concurrent.futures
+import concurrent
 import contextlib
 import json
 import re
 import socket
 import urllib.error
-import urllib.request
+from typing import TYPE_CHECKING
+
+import lazyimports  # noqa: F401 — registers urllib.request & co. to load on first use
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import concurrent.futures
+    import urllib.request
 
 API = "bash.ws"
 PROBE_COUNT = 30
@@ -50,6 +56,7 @@ def _describe(e: Exception) -> str:
         text = str(reason) if not isinstance(reason, str) else reason
         return text.split(": ", 1)[-1] if text.startswith("_ssl.c") else text
     return str(e) or type(e).__name__
+
 
 # Public anycast resolvers — their egress can sit in any country near the
 # tunnel exit, so answering from one of these is never a leak on its own.

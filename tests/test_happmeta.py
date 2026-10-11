@@ -30,9 +30,7 @@ def test_parse_providers_reads_real_log(tmp_path, monkeypatch):
         "MyProv fetching subscription from sub.com\n"
     )
     routing = tmp_path / "routing.json"
-    routing.write_text(
-        json.dumps({"routings": [{"subscriptionId": 42, "name": "LegacyRouting"}]})
-    )
+    routing.write_text(json.dumps({"routings": [{"subscriptionId": 42, "name": "LegacyRouting"}]}))
     monkeypatch.setattr(happmeta, "LOG_FILE", log)
     monkeypatch.setattr(happmeta, "ROUTING_FILE", routing)
 
@@ -69,9 +67,7 @@ def test_parse_providers_added_subscription(tmp_path, monkeypatch):
     )
     providers = _added_providers(tmp_path, monkeypatch, log_text)
     (sub_id,) = [i for i, p in providers.items() if "wirecat" in p["url"]]
-    assert sub_id == "h" + hashlib.sha1(
-        b"https://shop.wirecat.link/cart/TOKEN"
-    ).hexdigest()[:10]
+    assert sub_id == "h" + hashlib.sha1(b"https://shop.wirecat.link/cart/TOKEN").hexdigest()[:10]
     assert providers[sub_id] == {
         "name": "WireCat",
         "url": "https://shop.wirecat.link/cart/TOKEN",
@@ -144,9 +140,7 @@ def test_parse_providers_added_without_name_uses_host(tmp_path, monkeypatch):
         "[20.09.2026 02:18:49] Subscription being added: https://sub.kushmakers.org/new/TOK\n",
     )
     (sub_id,) = providers.keys()
-    assert sub_id == "h" + hashlib.sha1(
-        b"https://sub.kushmakers.org/new/TOK"
-    ).hexdigest()[:10]
+    assert sub_id == "h" + hashlib.sha1(b"https://sub.kushmakers.org/new/TOK").hexdigest()[:10]
     assert providers[sub_id] == {
         "name": "sub.kushmakers.org",
         "url": "https://sub.kushmakers.org/new/TOK",
@@ -439,7 +433,6 @@ def test_update_subscriptions_stamps_marker_even_on_failure(tmp_path, monkeypatc
 
 
 def test_fetch_subscription_cache_is_private(tmp_path, monkeypatch):
-    import os
 
     monkeypatch.setattr(happmeta, "SUB_CACHE_DIR", tmp_path)
     headers_file = tmp_path / "headers.json"
@@ -459,7 +452,7 @@ def test_fetch_subscription_cache_is_private(tmp_path, monkeypatch):
     monkeypatch.setattr(happmeta.urllib.request, "urlopen", lambda req, timeout: FakeResp())
     servers = happmeta.fetch_subscription("1", "https://x/1")
     assert [s["remarks"] for s in servers] == ["S"]
-    assert (os.stat(tmp_path / "subscription-1.json").st_mode & 0o777) == 0o600
+    assert ((tmp_path / "subscription-1.json").stat().st_mode & 0o777) == 0o600
 
 
 def _fresh_sub_cache(tmp_path, monkeypatch):
@@ -650,9 +643,7 @@ def test_fetch_subscription_cache_url_revalidation(tmp_path, monkeypatch):
             self._remark = remark
 
         def read(self):
-            return json.dumps(
-                [{"remarks": self._remark, "outbounds": [{}]}]
-            ).encode()
+            return json.dumps([{"remarks": self._remark, "outbounds": [{}]}]).encode()
 
         def __enter__(self):
             return self
@@ -662,13 +653,9 @@ def test_fetch_subscription_cache_url_revalidation(tmp_path, monkeypatch):
 
     # fresh record, mismatched url -> refetch happens, new servers returned
     (tmp_path / "subscription-1.json").write_text(
-        json.dumps(
-            {"at": time.time(), "url": "https://x/old", "servers": [{"remarks": "old"}]}
-        )
+        json.dumps({"at": time.time(), "url": "https://x/old", "servers": [{"remarks": "old"}]})
     )
-    monkeypatch.setattr(
-        happmeta.urllib.request, "urlopen", lambda req, timeout: FakeResp("new")
-    )
+    monkeypatch.setattr(happmeta.urllib.request, "urlopen", lambda req, timeout: FakeResp("new"))
     servers = happmeta.fetch_subscription("1", "https://x/new")
     assert [s["remarks"] for s in servers] == ["new"]
 
@@ -715,9 +702,7 @@ def test_fetch_subscription_keeps_info_on_headerless_refresh(tmp_path, monkeypat
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(
-        happmeta.urllib.request, "urlopen", lambda req, timeout: FakeResp()
-    )
+    monkeypatch.setattr(happmeta.urllib.request, "urlopen", lambda req, timeout: FakeResp())
     happmeta.fetch_subscription("1", "https://x/sub")
     kept = happmeta.subscription_info("1")
     assert kept == info
@@ -764,9 +749,7 @@ def _patch_fetch_env(tmp_path, monkeypatch, headers):
     headers_file = tmp_path / "headers.json"
     headers_file.write_text('{"User-Agent": "Happ/1.0"}')
     monkeypatch.setattr(happmeta, "HEADERS_FILE", headers_file)
-    monkeypatch.setattr(
-        happmeta.urllib.request, "urlopen", lambda req, timeout: _InfoResp(headers)
-    )
+    monkeypatch.setattr(happmeta.urllib.request, "urlopen", lambda req, timeout: _InfoResp(headers))
 
 
 def test_fetch_subscription_stores_parsed_info(tmp_path, monkeypatch):
@@ -990,8 +973,13 @@ def test_domain_server_addresses_bootstrap_direct_via_tagged_resolver():
 def test_ip_only_servers_need_no_bootstrap_resolver():
     server_cfg = {
         "remarks": "ip",
-        "outbounds": [{"protocol": "hysteria", "tag": "proxy",
-                       "settings": {"address": "198.51.100.1", "port": 443, "version": 2}}],
+        "outbounds": [
+            {
+                "protocol": "hysteria",
+                "tag": "proxy",
+                "settings": {"address": "198.51.100.1", "port": 443, "version": 2},
+            }
+        ],
         "dns": {"servers": ["8.8.8.8"]},
     }
     cfg = happmeta.build_runtime_config(server_cfg)
@@ -1022,10 +1010,16 @@ def test_bootstrap_resolver_falls_back_when_subscription_has_none():
 _SUB_DNS_DIRECT = {
     "remarks": "🇩🇪 Германия 1",
     "outbounds": [
-        {"protocol": "vless", "tag": "proxy",
-         "settings": {"vnext": [{"address": "203.0.113.5", "port": 443}]}},
-        {"protocol": "vless", "tag": "bs",
-         "settings": {"vnext": [{"address": "203.0.113.6", "port": 443}]}},
+        {
+            "protocol": "vless",
+            "tag": "proxy",
+            "settings": {"vnext": [{"address": "203.0.113.5", "port": 443}]},
+        },
+        {
+            "protocol": "vless",
+            "tag": "bs",
+            "settings": {"vnext": [{"address": "203.0.113.6", "port": 443}]},
+        },
         {"protocol": "freedom", "tag": "direct"},
     ],
     "dns": {"servers": ["1.1.1.1", "1.0.0.1"]},

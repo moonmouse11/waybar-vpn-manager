@@ -236,8 +236,7 @@ def test_keeper_no_rearm_on_stopped(tmp_path, monkeypatch):
     """happd's own "stopped" event is the user's disconnect — the keeper
     must NOT re-arm; exactly one start frame is sent."""
     sock = FakeSock(
-        _frame({"request-id": "wm-12345", "status": "started"})
-        + _frame({"event": "stopped"})
+        _frame({"request-id": "wm-12345", "status": "started"}) + _frame({"event": "stopped"})
     )
     cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
     writes = _run_keeper_env(tmp_path, monkeypatch, sock, cfg)
@@ -480,8 +479,9 @@ def test_connect_passes_provider_to_resolve_and_keeper(tmp_path, monkeypatch):
     monkeypatch.setattr(
         prov,
         "_headless_connect",
-        lambda name, provider_id=None: keeper_calls.append((name, provider_id))
-        or ActionResult(True, "ok"),
+        lambda name, provider_id=None: (
+            keeper_calls.append((name, provider_id)) or ActionResult(True, "ok")
+        ),
     )
     conn = VPNConnection(name="S", provider="Happ", active=False, subscription_id="2")
     assert prov.connect(conn).success
@@ -536,9 +536,7 @@ def test_xray_config_error_none_when_config_ok(monkeypatch):
     assert happ.xray_config_error({}, None) is None
 
 
-@pytest.mark.parametrize(
-    "exc", [FileNotFoundError("xray"), subprocess.TimeoutExpired("xray", 10)]
-)
+@pytest.mark.parametrize("exc", [FileNotFoundError("xray"), subprocess.TimeoutExpired("xray", 10)])
 def test_xray_config_error_never_blocks_connect_when_check_itself_fails(monkeypatch, exc):
     # a missing/hung xray is happd's problem to report, not a config error
     monkeypatch.setattr(happ.subprocess, "run", _XrayRun(exc=exc))
@@ -632,10 +630,12 @@ def test_keeper_exits_on_happd_452_finished_after_a_requested_stop(tmp_path, mon
     socks = []
 
     def factory():
-        socks.append(FakeSock(
-            _frame({"request-id": "wm-12345", "status": "started"}) + _STOP_FRAMES_452,
-            raise_timeout=True,
-        ))
+        socks.append(
+            FakeSock(
+                _frame({"request-id": "wm-12345", "status": "started"}) + _STOP_FRAMES_452,
+                raise_timeout=True,
+            )
+        )
         return socks[-1]
 
     cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
@@ -654,9 +654,11 @@ def test_keeper_rearms_when_xray_finishes_on_its_own(tmp_path, monkeypatch):
     def factory():
         crash = _frame({"data": "2", "event": "finished", "process-id": "xray-core"})
         first = not socks
-        socks.append(FakeSock(
-            _frame({"request-id": "wm-12345", "status": "started"}) + (crash if first else b""),
-        ))
+        socks.append(
+            FakeSock(
+                _frame({"request-id": "wm-12345", "status": "started"}) + (crash if first else b""),
+            )
+        )
         return socks[-1]
 
     cfg = {"remarks": "S", "inbounds": [{"protocol": "tun", "settings": {"name": "x"}}]}
@@ -692,7 +694,6 @@ def test_keeper_exits_once_another_keeper_owns_the_state(tmp_path, monkeypatch):
     assert notes == []
 
 
-
 def test_connections_never_borrow_the_guis_last_server_for_a_tunnel_we_dont_own(
     tmp_path, monkeypatch
 ):
@@ -705,9 +706,7 @@ def test_connections_never_borrow_the_guis_last_server_for_a_tunnel_we_dont_own(
         {"name": "🇩🇪 Германия+", "provider_id": "u", "provider_name": "Unlock", "config": {}},
         {"name": "🇵🇱 Польша 1", "provider_id": "a", "provider_name": "ARTΞMIDA", "config": {}},
     ]
-    _patch_env(
-        monkeypatch, tmp_path, servers, [], ["xray-core"], "🇩🇪 Германия+", None, gui=False
-    )
+    _patch_env(monkeypatch, tmp_path, servers, [], ["xray-core"], "🇩🇪 Германия+", None, gui=False)
     conns = happ.HappProvider().connections()
     active = [c for c in conns if c.active]
     assert [(c.name, c.subscription_id) for c in active] == [("Happ", None)]
@@ -731,7 +730,7 @@ def test_process_list_cache_is_dropped_when_we_change_happd_state(tmp_path, monk
     monkeypatch.setattr(happ, "KEEPER_STATE", tmp_path / "keeper.json")
     monkeypatch.setattr(happ, "_daemon_running_processes", lambda fresh=False: ["xray-core"])
     monkeypatch.setattr(happ, "_daemon_request", lambda action, **kw: {"status": "stopping"})
-    monkeypatch.setattr(happ, "_happ_interfaces", lambda: [])
+    monkeypatch.setattr(happ, "_happ_interfaces", list)
     provider = happ.HappProvider()
     if action == "disconnect":
         provider.disconnect(happ.VPNConnection(name="x", provider="Happ", active=True))

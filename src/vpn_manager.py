@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -40,6 +41,9 @@ from providers.base import (
     iface_traffic,
     sample_iface_traffic,
 )
+from providers.happ import run_keeper as run_happ_keeper
+from providers.keys import KeysProvider
+from providers.keys import run_keeper as run_keys_keeper
 
 WAYBAR_SIGNAL = 11
 
@@ -293,7 +297,8 @@ def _killswitch_all_targets() -> tuple[list[str], list[str]]:
             continue  # endpoints not parsed (v1) — connecting one suspends the killswitch
         try:
             pt = provider.ping_targets()
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — one broken provider must not stop the rest
+            logutil.log(f"killswitch targets: {provider.name} skipped: {e!r}")
             continue
         targets += pt
         if provider.name in ("WireGuard", "AmneziaWG"):
@@ -309,7 +314,7 @@ def _killswitch_all_targets() -> tuple[list[str], list[str]]:
         elif provider.name == "OpenVPN":
             if pt:
                 ifaces.append("tun*")  # OpenVPN tunnel interfaces
-        elif provider.name in ("VLESS", "Shadowsocks") and pt:
+        elif isinstance(provider, KeysProvider) and pt:
             ifaces.append(provider.tunnel_iface)
     targets += happmeta.subscription_targets()  # refreshes must survive the killswitch
     return killswitch.resolve_endpoint_ips(targets), sorted(set(ifaces))
@@ -325,7 +330,7 @@ def _killswitch_toggle(on: bool) -> ActionResult:
 KILLSWITCH_ICON = settings_tui.KILLSWITCH_ICON
 
 
-def _killswitch_item() -> tuple[str, callable]:
+def _killswitch_item() -> tuple[str, Callable]:
     if killswitch.is_enabled() or killswitch.mode() in ("happ", "all"):
         return (
             f"{KILLSWITCH_ICON} Killswitch: ON — click to disable",
@@ -339,7 +344,7 @@ def _killswitch_item() -> tuple[str, callable]:
 
 def _dns_leak_server_row(
     server: dict, ip_country: str = "", ip_asn: int | None = None
-) -> tuple[str, callable]:
+) -> tuple[str, Callable]:
     """One row per detected resolver — the wider walker window (see
     WALKER_WIDTH) is the actual fix for these getting truncated; no need to
     collapse the list to make it fit. 'Leaked' when dnsleak.server_tags()
@@ -358,6 +363,7 @@ def _dns_leak_server_row(
 
 _FLAG = re.compile("[\U0001f1e6-\U0001f1ff]{2}")  # a pair of regional indicators
 # 🇪🇺 is not a country — 13 real servers carry it and exit in a member state
+# fmt: off
 EU_MEMBERS = frozenset(
     {
         "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES",
@@ -365,6 +371,7 @@ EU_MEMBERS = frozenset(
         "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK",
     }
 )
+# fmt: on
 
 
 def _exit_fits(expected: str, ip_country: str) -> bool:
@@ -393,8 +400,11 @@ def _dns_leak_exit_row(
     the expected country: leased blocks geolocate inconsistently."""
     if not active:
         return "No VPN active — this is your real IP"
-    known = [(c.name, _name_flag_country(c.name) or reputation.country_of(c.name)) for c in active]
-    known = [(name, cc) for name, cc in known if cc]
+    known = [
+        (c.name, cc)
+        for c in active
+        if (cc := _name_flag_country(c.name) or reputation.country_of(c.name))
+    ]
     if not known:
         return f"VPN: {active[0].name}"
     for name, cc in known:
@@ -454,7 +464,7 @@ def dns_leak_test_menu() -> ActionResult:
 
     active = active_connections()
     ip_country, ip_asn = result["ip_country"], result.get("ip_asn")
-    items: list[tuple[str, callable]] = []
+    items: list[tuple[str, Callable]] = []
     if result["ip"]:
         flag = ipinfo.flag_emoji(ip_country)
         items.append((f"IP: {result['ip']} {flag}".strip(), lambda: ActionResult(True, "")))
@@ -475,7 +485,7 @@ def dns_leak_test_menu() -> ActionResult:
     return ActionResult(True, "")
 
 
-def _ip_info_flag_row(label: str, value: bool | None) -> tuple[str, callable]:
+def _ip_info_flag_row(label: str, value: bool | None) -> tuple[str, Callable]:
     text = "Yes" if value else "No"
     return (f"{label}: {text}", lambda: ActionResult(True, ""))
 
@@ -502,7 +512,7 @@ def ip_info_menu() -> ActionResult:
         return ActionResult(False, "")  # already notified, with the reason
     progress.done("Done")
 
-    items: list[tuple[str, callable]] = [(f"IP: {findings[0].ip}", lambda: ActionResult(True, ""))]
+    items: list[tuple[str, Callable]] = [(f"IP: {findings[0].ip}", lambda: ActionResult(True, ""))]
     for finding in findings:
         parts = [p for p in (finding.country_name, finding.org) if p]
         if finding.abuse_score is not None:
@@ -542,7 +552,7 @@ def speed_test_menu() -> ActionResult:
         if url not in preset_urls  # its preset row already covers it
     ]
     every = [(name, url) for _icon, name, url in targets]
-    items: list[tuple[str, callable]] = [
+    items: list[tuple[str, Callable]] = [
         (SPEED_TEST_ALL_LABEL, lambda: _run_speed_tests(every, SPEED_TEST_ALL_DURATION))
     ]
     items += [
@@ -582,7 +592,7 @@ def _run_speed_tests(
 
     noop = lambda: ActionResult(True, "")  # noqa: E731 — info rows do nothing
     active = active_connections()
-    items: list[tuple[str, callable]] = [
+    items: list[tuple[str, Callable]] = [
         (_speed_test_route_row(active), noop),
         *((_speed_test_result_row(name, m), noop) for name, m in results),
     ]
@@ -701,9 +711,7 @@ def run_configure_wizard(prompter: Prompter) -> bool:
         cfg = config.Config()
 
     for provider in ALL_PROVIDERS:
-        visible = prompter.confirm(
-            f"Show {provider.name}?", cfg.provider_visible(provider.name)
-        )
+        visible = prompter.confirm(f"Show {provider.name}?", cfg.provider_visible(provider.name))
         cfg.providers[provider.name.lower()] = visible
 
     for key, label, _fn in [*TOOLS, ("killswitch", "Killswitch", None)]:
@@ -712,9 +720,7 @@ def run_configure_wizard(prompter: Prompter) -> bool:
 
     for source in ipsources.ALL_SOURCES:
         if source.needs_api_key:
-            answer = prompter.text(
-                f"{source.name} API key (Enter — keep current / skip)"
-            )
+            answer = prompter.text(f"{source.name} API key (Enter — keep current / skip)")
             if answer:
                 cfg.ip_sources.setdefault(source.key, {})["api_key"] = answer
         else:
@@ -809,7 +815,7 @@ def tools_menu() -> ActionResult:
     return ActionResult(True, "")
 
 
-def provider_actions(provider) -> list[tuple[str, callable]]:
+def provider_actions(provider) -> list[tuple[str, Callable]]:
     """Import / manage entries for providers that support them."""
     if provider.name in ("WireGuard", "AmneziaWG"):
         return [
@@ -840,7 +846,7 @@ def provider_actions(provider) -> list[tuple[str, callable]]:
 def menu_loop() -> ActionResult:
     """Level 1: the active connection with metrics, providers to pick from,
     quick disconnect, and the killswitch toggle — always the last row."""
-    items: list[tuple[str, callable]] = []
+    items: list[tuple[str, Callable]] = []
 
     all_active = active_connections(providers=list(ALL_PROVIDERS))
     if all_active:
@@ -885,7 +891,7 @@ def menu_loop() -> ActionResult:
     return run_items(items, prompt="VPN")
 
 
-def _current_connection_items(conn: VPNConnection) -> list[tuple[str, callable]]:
+def _current_connection_items(conn: VPNConnection) -> list[tuple[str, Callable]]:
     """First menu rows: what is connected + live metrics. Row 1 reconnects
     the server; row 2 (metrics, indented) shows the full detail card.
     dmenu rows are single-line, so the metrics get their own row instead
@@ -933,7 +939,7 @@ def _reconnect(conn: VPNConnection) -> ActionResult:
     return guarded_connect(provider, conn)
 
 
-def _no_vpn_ip_item() -> tuple[str, callable] | None:
+def _no_vpn_ip_item() -> tuple[str, Callable] | None:
     """Not connected: the first row shows the real public IP (cache-first —
     the --status tick is not running to refresh it, so trigger a fetch when
     stale). Click re-fetches and shows the full line."""
@@ -965,7 +971,7 @@ def provider_menu(provider) -> ActionResult:
 
     happmeta.request_ping_update()
     reputation.request_update()
-    items: list[tuple[str, callable]] = []
+    items: list[tuple[str, Callable]] = []
     for conn in provider.connections():
         info = happmeta.ping_mark(conn.name)
         suffix = f"    {info}" if info else ""
@@ -1020,7 +1026,7 @@ def happ_menu(provider) -> ActionResult:
             }
         )
 
-    items: list[tuple[str, callable]] = []
+    items: list[tuple[str, Callable]] = []
     for pname, group in groups.items():
         active = sum(1 for g in group if g["active"])
         summary = happmeta.provider_ping_summary([g["name"] for g in group])
@@ -1036,6 +1042,8 @@ def happ_menu(provider) -> ActionResult:
     items.append(("  Refresh subscriptions", _refresh_subscriptions))
     items.append((BACK_LABEL, back_to_main))
     run_items(items, prompt="Happ")
+    # the submenu already notified; returning None crashed the caller's result.success
+    return ActionResult(True, "")
 
 
 def _refresh_subscriptions() -> ActionResult:
@@ -1056,7 +1064,7 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
     if not entries:
         notify("Happ", f"{pname}: no servers")
         return ActionResult(True, "")
-    items: list[tuple[str, callable]] = []
+    items: list[tuple[str, Callable]] = []
 
     # Panel card info (traffic/expiry) from the subscription cache — the
     # first "ⓘ" entry only notifies, it is not connectable.
@@ -1098,9 +1106,9 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
             subscription_name=pname,
         )
         label = f"Disconnect {conn.name}" if conn.active else conn.name
-        info = happmeta.server_info_suffix(conn.name, entry.get("protocol", ""))
-        if info:
-            label += f"    {info}"
+        suffix = happmeta.server_info_suffix(conn.name, entry.get("protocol", ""))
+        if suffix:
+            label += f"    {suffix}"
         if conn.active:
             items.append((label, lambda c=conn: guarded_disconnect(provider, c)))
         else:
@@ -1110,7 +1118,7 @@ def happ_provider_menu(provider, pname: str, entries: list) -> ActionResult:
     return ActionResult(True, "")
 
 
-def _unique_labels(items: list[tuple[str, callable]]) -> list[tuple[str, callable]]:
+def _unique_labels(items: list[tuple[str, Callable]]) -> list[tuple[str, Callable]]:
     """Disambiguate repeated labels so every menu entry stays reachable.
 
     Two servers can render identically (same remarks + same info suffix) and
@@ -1137,7 +1145,7 @@ def _unique_labels(items: list[tuple[str, callable]]) -> list[tuple[str, callabl
     return unique
 
 
-def run_items(items: list[tuple[str, callable]], prompt: str) -> ActionResult:
+def run_items(items: list[tuple[str, Callable]], prompt: str) -> ActionResult:
     """Show one walker menu, run the chosen action, notify + refresh waybar."""
     if not items:
         notify("VPN", "Nothing available")
@@ -1210,14 +1218,17 @@ def walker_select(options: list[str], prompt: str = "VPN") -> str | None:
             capture_output=True,
             text=True,
             timeout=WALKER_TIMEOUT,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         # the walker gapplication-service occasionally wedges: no window and
         # the client hangs forever. SIGKILL the service (it ignores SIGTERM)
         # — dbus activation brings up a fresh one on the next invocation.
         logutil.log(f"walker timed out after {WALKER_TIMEOUT}s — restarting the service")
-        subprocess.run(["pkill", "-9", "-f", "walker --gapplication-service"], capture_output=True)
-        subprocess.run(["pkill", "-f", "walker -d"], capture_output=True)
+        subprocess.run(
+            ["pkill", "-9", "-f", "walker --gapplication-service"], capture_output=True, check=False
+        )
+        subprocess.run(["pkill", "-f", "walker -d"], capture_output=True, check=False)
         notify(
             "VPN — Error",
             "walker hung — service restarted, open the menu again",
@@ -1250,6 +1261,7 @@ def walker_input(prompt: str) -> str | None:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
     except FileNotFoundError:
         notify("Error", "walker not found", urgent=True)
@@ -1281,7 +1293,8 @@ def _collect_ping_targets() -> list[tuple[str, str, int]]:
     for provider in ALL_PROVIDERS:
         try:
             targets += provider.ping_targets()
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — one broken provider must not stop the rest
+            logutil.log(f"ping targets: {provider.name} skipped: {e!r}")
             continue
     return targets
 
@@ -1293,7 +1306,7 @@ def notify(title: str, message: str, urgent: bool = False):
 
 
 def refresh_waybar():
-    subprocess.run(["pkill", f"-RTMIN+{WAYBAR_SIGNAL}", "waybar"], capture_output=True)
+    subprocess.run(["pkill", f"-RTMIN+{WAYBAR_SIGNAL}", "waybar"], capture_output=True, check=False)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1371,12 +1384,8 @@ def main():
     elif args.update_subs_force:
         happmeta.update_subscriptions(force=True)
     elif args.happ_keeper is not None:
-        from providers.happ import run_keeper
-
-        run_keeper(*args.happ_keeper[:2])
+        run_happ_keeper(*args.happ_keeper[:2])
     elif args.keys_keeper is not None:
-        from providers.keys import run_keeper as run_keys_keeper
-
         run_keys_keeper(*args.keys_keeper)
     elif args.settings:
         run_settings_window()

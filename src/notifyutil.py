@@ -39,6 +39,7 @@ def clean_body(text: str) -> str:
 def send(
     title: str,
     message: str,
+    *,
     urgent: bool = False,
     replace_id: int | None = None,
     expire_ms: int | None = None,
@@ -76,7 +77,7 @@ def send(
 def _run(cmd: list[str]):
     # a detached keeper has no one to report a missing notify-send to
     try:
-        return subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
     except OSError:
         return None
 

@@ -4,11 +4,16 @@ registry (providers/__init__.py) for the VPN-backend side of this project.
 """
 
 import json
-import urllib.request
+import urllib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import config
+import lazyimports  # noqa: F401 — registers urllib.request & co. to load on first use
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import urllib.request
 
 
 def fetch_json(url: str, headers: dict | None = None, timeout: int = 8) -> dict | None:
@@ -16,8 +21,8 @@ def fetch_json(url: str, headers: dict | None = None, timeout: int = 8) -> dict 
     non-2xx). Shared by every concrete source so each one's lookup() stays
     a plain "build a URL, read the response" function."""
     try:
-        req = urllib.request.Request(url, headers=headers or {})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        req = urllib.request.Request(url, headers=headers or {})  # noqa: S310 — see below
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — sources' own https URLs
             data = json.loads(resp.read().decode())
     except (OSError, ValueError):
         return None

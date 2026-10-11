@@ -19,10 +19,10 @@ share-link query params (reality/tls, grpc/ws/tcp).
 import base64
 import binascii
 import contextlib
-import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -64,6 +64,7 @@ def _kind_meta(kind: str) -> tuple[str, str, Path]:
         IFACES[kind],
         KEEPER_STATE_DIR / f"keys-keeper-{kind}.json",
     )
+
 
 # xray 26 shadowsocks methods — AEAD only; the legacy stream ciphers
 # (aes-*-cfb/ctr, chacha20, salsa20, rc4-md5) were REMOVED from the core,
@@ -298,18 +299,38 @@ def _save_servers(servers: list[dict]) -> None:
     fsutil.write_json_atomic(STORE, servers, ensure_ascii=False, indent=1)
 
 
-def _server_id(server: dict) -> str:
+def _key_fields(server: dict) -> tuple:
+    """What makes two imported keys the same key."""
     secret = server.get("password") or server.get("id") or ""
-    raw = f"{server['kind']}:{server.get('method', '')}:{secret}@{server['host']}:{server['port']}"
-    return hashlib.sha1(raw.encode()).hexdigest()[:8]
+    return (server["kind"], server.get("method", ""), secret, server["host"], server["port"])
+
+
+def _new_uid() -> str:
+    # Random, never derived from the key: the uid is a keeper argv argument,
+    # visible to every local user in `ps`. A hash of the secret (the old
+    # sha1 id) handed out 32 bits of it — enough to brute-force a weak
+    # Shadowsocks password offline (CodeQL: weak hashing of sensitive data).
+    return secrets.token_hex(4)
+
+
+def _ensure_uids() -> list[dict]:
+    """Give keys imported before uids existed one, saving once. Called on the
+    connect path only — the 3-second --status tick never writes the store."""
+    servers = _load_servers()
+    missing = [s for s in servers if not s.get("uid")]
+    if missing:
+        for server in missing:
+            server["uid"] = _new_uid()
+        _save_servers(servers)
+    return servers
 
 
 def add_server(parsed: dict) -> ActionResult:
     """Store a parsed key; identical keys dedupe, same-name keys get a suffix."""
     servers = _load_servers()
-    new_id = _server_id(parsed)
-    if any(_server_id(s) == new_id for s in servers):
+    if any(_key_fields(s) == _key_fields(parsed) for s in servers):
         return ActionResult(False, f"Already imported: {parsed['name']}")
+    parsed["uid"] = _new_uid()
     name = parsed["name"]
     if any(s["name"] == name for s in servers):
         n = 2
@@ -450,7 +471,7 @@ def run_keeper(kind: str, server_id: str) -> None:
     attempts = 0
     exit_reason = "unknown"
     try:
-        server = next((s for s in _load_servers() if _server_id(s) == server_id), None)
+        server = next((s for s in _load_servers() if s.get("uid") == server_id), None)
         if server is None:
             state.update(status="error", message="server not found in store")
             _write_keeper_state(state_path, state)
@@ -517,9 +538,10 @@ def run_keeper(kind: str, server_id: str) -> None:
                     sock,
                     iface,
                     process_id,
-                    owns_state=lambda: (_read_keeper_state(state_path) or {}).get("pid")
-                    == os.getpid(),
-                    iface_exists=lambda name: _iface_exists(name),
+                    owns_state=lambda: (
+                        (_read_keeper_state(state_path) or {}).get("pid") == os.getpid()
+                    ),
+                    iface_exists=_iface_exists,
                 )
             finally:
                 sock.close()
@@ -602,11 +624,12 @@ class KeysProvider(VPNProvider):
         ]
 
     def connect(self, connection: VPNConnection) -> ActionResult:
+        _ensure_uids()
         server = _find_server(connection.name)
         if server is None or server.get("kind") != self._kind:
             return ActionResult(False, f"Unknown {self.name} server: {connection.name}")
         self._stop_running()  # one server per protocol at a time
-        return self._headless_connect(_server_id(server))
+        return self._headless_connect(server["uid"])
 
     def _headless_connect(self, server_id: str) -> ActionResult:
         _, _, state_path = _kind_meta(self._kind)

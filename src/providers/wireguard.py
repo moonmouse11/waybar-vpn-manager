@@ -8,7 +8,7 @@ AMNEZIA_DIR = Path("/etc/amnezia/amneziawg")
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     output = (result.stdout + result.stderr).strip()
     return result.returncode, output
 
@@ -51,10 +51,10 @@ def _split_host_port(value: str, default_port: int) -> tuple[str, int] | None:
     if v.count(":") > 1:  # bare IPv6, no port
         return v, default_port
     if ":" in v:
-        host, _, port = v.rpartition(":")
-        if not host or not port.isdigit():
+        host, _, port_s = v.rpartition(":")
+        if not host or not port_s.isdigit():
             return None
-        port = int(port)
+        port = int(port_s)
         return (host, port) if port <= 65535 else None
     return v, default_port
 
@@ -132,7 +132,7 @@ class WireGuardProvider(VPNProvider):
 
     def connections(self) -> list[VPNConnection]:
         active = set(_active_interfaces(self.link_type)) | self._extra_active()
-        result = []
+        result: list[VPNConnection] = []
 
         if not self.config_dir.exists():
             return result
@@ -157,16 +157,11 @@ class WireGuardProvider(VPNProvider):
         # even though its profile actually lives under the other provider.
         known = {c.name for c in result}
         excluded = {p.stem for d in self.other_config_dirs for p in d.glob("*.conf")}
-        for iface in active:
-            if iface not in known and iface not in excluded:
-                result.append(
-                    VPNConnection(
-                        name=iface,
-                        provider=self.name,
-                        active=True,
-                        interface=iface,
-                    )
-                )
+        result.extend(
+            VPNConnection(name=iface, provider=self.name, active=True, interface=iface)
+            for iface in active
+            if iface not in known and iface not in excluded
+        )
 
         return result
 

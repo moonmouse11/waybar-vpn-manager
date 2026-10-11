@@ -27,7 +27,7 @@ class FakeProvider:
 
 def patch_menu_env(monkeypatch, providers, picks):
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", providers)
-    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: config.Config())
+    monkeypatch.setattr(vpn_manager.config, "load_config", config.Config)
     monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
     monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
     # deterministic default: the real ~/.cache/vpn-manager/reputation.json
@@ -62,7 +62,7 @@ def test_level1_shows_providers_with_counts(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or next(picks, None)),
+        lambda options, prompt="VPN": seen.append(list(options)) or next(picks, None),
     )
     vpn_manager.run_menu()
     options = seen[0]
@@ -100,7 +100,7 @@ def test_happ_provider_menu_disambiguates_duplicate_labels(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "VPNConnection",
-        lambda **kw: (made.append(SimpleNamespace(**kw)) or made[-1]),
+        lambda **kw: made.append(SimpleNamespace(**kw)) or made[-1],
     )
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [provider])
     monkeypatch.setattr(vpn_manager.happmeta, "server_info_suffix", lambda name, protocol="": "")
@@ -113,7 +113,7 @@ def test_happ_provider_menu_disambiguates_duplicate_labels(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or next(picks, None)),
+        lambda options, prompt="VPN": seen.append(list(options)) or next(picks, None),
     )
 
     vpn_manager.happ_provider_menu(provider, "P", entries)
@@ -129,9 +129,7 @@ def _happ_menu_setup(monkeypatch, tmp_path, pings):
         {"name": "s2", "provider_name": "P1", "provider_id": "1", "config": {}},
         {"name": "s3", "provider_name": "P2", "provider_id": "2", "config": {}},
     ]
-    provider = FakeProvider(
-        "Happ", [VPNConnection(name="s1", provider="Happ", active=True)]
-    )
+    provider = FakeProvider("Happ", [VPNConnection(name="s1", provider="Happ", active=True)])
     monkeypatch.setattr(vpn_manager.happmeta, "request_ping_update", lambda: None)
     monkeypatch.setattr(vpn_manager.happmeta, "request_subscription_update", lambda: None)
     monkeypatch.setattr(vpn_manager.reputation, "request_update", lambda: None)
@@ -144,7 +142,7 @@ def _happ_menu_setup(monkeypatch, tmp_path, pings):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.happ_menu(provider)
     return seen[0]
@@ -182,7 +180,7 @@ def test_happ_provider_menu_labels_show_availability(monkeypatch, tmp_path):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
 
     entries = [
@@ -194,9 +192,6 @@ def test_happ_provider_menu_labels_show_availability(monkeypatch, tmp_path):
     assert "✓ 12 ms" in seen[0][0]
     assert "⛔" in seen[0][1]
     assert seen[0][2] == "unknown"  # stale -> no mark at all
-
-
-
 
 
 def test_happ_menu_provider_labels_include_ping_summary(monkeypatch, tmp_path):
@@ -249,10 +244,13 @@ def test_happ_menu_never_blocks_on_the_network(monkeypatch):
     monkeypatch.setattr(vpn_manager.happmeta, "all_servers", fake_all_servers)
     monkeypatch.setattr(vpn_manager, "walker_select", lambda options, prompt="VPN": None)
 
-    vpn_manager.happ_menu(provider)
+    result = vpn_manager.happ_menu(provider)
 
     assert "request_subscription_update" in calls
     assert ("all_servers", False) in calls
+    # regression (found by mypy): it used to fall off the end and return None,
+    # and run_items() reads result.success on whatever the action returns
+    assert result == vpn_manager.ActionResult(True, "")
 
 
 def test_two_level_connect(monkeypatch):
@@ -267,9 +265,6 @@ def test_two_level_disconnect_active(monkeypatch):
     patch_menu_env(monkeypatch, [wg], picks=["WireGuard  (1/1)", "Disconnect nl"])
     vpn_manager.run_menu()
     assert wg.disconnected == ["nl"]
-
-
-
 
 
 def test_back_returns_to_level1(monkeypatch):
@@ -486,8 +481,10 @@ def test_walker_timeout_restarts_service(monkeypatch):
         ran.append(cmd)
         if "walker" in cmd and "-d" in cmd:
             raise subprocess.TimeoutExpired(cmd, 1)
+
         class R:
             returncode = 0
+
         return R()
 
     notified = []
@@ -534,7 +531,7 @@ def test_level1_layout_connected(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.run_menu()
     options = seen[0]
@@ -578,7 +575,7 @@ def test_no_vpn_row_shows_current_ip(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.run_menu()
     assert seen[0][0] == "● No VPN · 95.24.1.2 🇷🇺"
@@ -596,7 +593,7 @@ def test_no_vpn_row_when_cache_stale_and_ip_disabled(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.run_menu()
     assert seen[0][0] == "● No VPN"
@@ -620,7 +617,7 @@ def test_level1_disconnect_all_label_for_multiple(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.run_menu()
     options = seen[0]
@@ -635,7 +632,7 @@ def test_level1_no_disconnect_row_when_idle(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.run_menu()
     options = seen[0]
@@ -668,8 +665,7 @@ def test_menu_loop_shows_named_keys_row_when_empty(monkeypatch):
         vpn_manager,
         "walker_select",
         lambda options, prompt="VPN": (
-            seen.append(list(options))
-            or next((o for o in options if o.startswith("VLESS")), None)
+            seen.append(list(options)) or next((o for o in options if o.startswith("VLESS")), None)
         ),
     )
     vpn_manager.menu_loop()
@@ -684,7 +680,7 @@ def test_menu_loop_hides_empty_keys_by_default(monkeypatch):
     wg = FakeProvider("WireGuard", [VPNConnection(name="nl", provider="WireGuard", active=False)])
     keys = FakeProvider("VLESS", [])
     monkeypatch.setattr(vpn_manager, "ALL_PROVIDERS", [wg, keys])
-    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: config.Config())
+    monkeypatch.setattr(vpn_manager.config, "load_config", config.Config)
     monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
     monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
@@ -694,7 +690,7 @@ def test_menu_loop_hides_empty_keys_by_default(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.menu_loop()
     assert not any(o.startswith("VLESS") for o in seen[0])
@@ -709,7 +705,7 @@ def test_menu_loop_always_shows_tools_row(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.menu_loop()
     assert "🛠️ Tools" in seen[0]
@@ -719,7 +715,7 @@ def test_menu_loop_always_shows_tools_row(monkeypatch):
 
 
 def test_tools_menu_lists_every_visible_tool(monkeypatch):
-    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: config.Config())
+    monkeypatch.setattr(vpn_manager.config, "load_config", config.Config)
     monkeypatch.setattr(vpn_manager.killswitch, "is_enabled", lambda: False)
     monkeypatch.setattr(vpn_manager.killswitch, "mode", lambda: "off")
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
@@ -727,7 +723,7 @@ def test_tools_menu_lists_every_visible_tool(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="Tools": (seen.append(list(options)) or None),
+        lambda options, prompt="Tools": seen.append(list(options)) or None,
     )
     vpn_manager.tools_menu()
     rows = seen[0]
@@ -755,7 +751,7 @@ def test_tools_menu_hides_disabled_tool(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="Tools": (seen.append(list(options)) or None),
+        lambda options, prompt="Tools": seen.append(list(options)) or None,
     )
     vpn_manager.tools_menu()
     assert "🔍 DNS Leak Test" not in seen[0]
@@ -990,15 +986,13 @@ def _dns_leak_menu_env(
     monkeypatch.setattr(vpn_manager.dnsleak, "run", lambda on_step=None: result)
     monkeypatch.setattr(vpn_manager.notifyutil, "Progress", _FakeProgress)
     monkeypatch.setattr(vpn_manager, "active_connections", lambda providers=None: list(active))
-    monkeypatch.setattr(
-        vpn_manager.reputation, "country_of", lambda name: (countries or {}).get(name)
-    )
+    monkeypatch.setattr(vpn_manager.reputation, "country_of", (countries or {}).get)
     monkeypatch.setattr(vpn_manager.ipv6guard, "is_disabled", lambda: ipv6_off)
     seen = []
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     return seen
 
@@ -1131,7 +1125,7 @@ def test_dns_leak_test_menu_builds_result_rows(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     result = vpn_manager.dns_leak_test_menu()
     assert result.success
@@ -1182,7 +1176,7 @@ def test_ip_info_menu_builds_rows(monkeypatch):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     result = vpn_manager.ip_info_menu()
     assert result.success
@@ -1271,15 +1265,13 @@ def _happ_provider_menu_env(monkeypatch, entries, info, seen, notifications, pic
 
     monkeypatch.setattr(vpn_manager.happmeta, "server_info_suffix", lambda name, protocol="": "")
     monkeypatch.setattr(vpn_manager.happmeta, "subscription_info", lambda sub_id: info)
-    monkeypatch.setattr(
-        vpn_manager, "notify", lambda *a, **k: notifications.append((a, k))
-    )
+    monkeypatch.setattr(vpn_manager, "notify", lambda *a, **k: notifications.append((a, k)))
     monkeypatch.setattr(vpn_manager, "refresh_waybar", lambda: None)
     picks_iter = iter(picks)
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or next(picks_iter, None)),
+        lambda options, prompt="VPN": seen.append(list(options)) or next(picks_iter, None),
     )
     return P()
 
@@ -1381,9 +1373,7 @@ def test_walker_input_passes_width_flags(monkeypatch):
 
 def test_refresh_all_menu_spawns_ping_and_subs_unconditionally(monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        vpn_manager.subprocess, "Popen", lambda cmd, **k: calls.append(cmd) or None
-    )
+    monkeypatch.setattr(vpn_manager.subprocess, "Popen", lambda cmd, **k: calls.append(cmd) or None)
     result = vpn_manager.refresh_all_menu()
     assert result.success
     flags = [c[2] for c in calls]  # [sys.executable, script_path, flag]
@@ -1447,7 +1437,7 @@ def test_happ_menu_name_clash_marks_only_active_provider(monkeypatch, tmp_path):
     monkeypatch.setattr(
         vpn_manager,
         "walker_select",
-        lambda options, prompt="VPN": (seen.append(list(options)) or None),
+        lambda options, prompt="VPN": seen.append(list(options)) or None,
     )
     vpn_manager.happ_menu(provider)
     assert "P2  (1/1)" in seen[0]
@@ -1475,7 +1465,7 @@ def test_main_menu_current_connection_shows_subscription(monkeypatch):
         name="🇩🇪 Germany", provider="Happ", active=True, subscription_name="Wirecat"
     )
     monkeypatch.setattr(vpn_manager, "iface_rate", lambda iface: "")
-    monkeypatch.setattr(vpn_manager.config, "load_config", lambda: config.Config())
+    monkeypatch.setattr(vpn_manager.config, "load_config", config.Config)
     monkeypatch.setattr(vpn_manager.ipinfo, "status_line", lambda name, age: None)
     monkeypatch.setattr(vpn_manager, "request_ip_update", lambda name: None)
     rows = vpn_manager._current_connection_items(conn)
@@ -1600,7 +1590,6 @@ def test_dns_leak_exit_row_eu_flag_accepts_any_member_state(monkeypatch):
         assert row in seen[0], exit_cc
 
 
-
 def test_dns_leak_exit_row_second_geo_opinion_clears_a_geo_db_mismatch(monkeypatch):
     """Poland 1: bash.ws geolocated its exit 192.144.78.10 (leased IPbnb
     block) to KR, ipwho.is to PL/Warsaw, ip-api to FR — while the resolvers
@@ -1625,7 +1614,6 @@ def test_dns_leak_exit_row_still_leaks_when_second_opinion_disagrees_too(monkeyp
         )
         vpn_manager.dns_leak_test_menu()
         assert "Leaked: exit ≠ 🇵🇱 Польша 1 🇵🇱" in seen[0], second
-
 
 
 def test_dns_leak_menu_shows_each_step_then_done(monkeypatch):
@@ -1657,7 +1645,6 @@ def test_dns_leak_menu_failure_names_the_step_and_reason(monkeypatch):
     assert "slow" in message  # timeout hint: a slow or blocking exit, not "no network"
     assert not result.success and result.message == ""  # notified once, not twice
     assert seen == []  # no empty results window
-
 
 
 def test_speed_test_all_failed_ends_progress_with_the_reason(monkeypatch):

@@ -14,7 +14,14 @@ uninstall:
 test-docker-build:
 	docker build -t waybar-vpn-manager-test -f Dockerfile.test .
 
+# Same checks as CI, on the host venv (fast; no live-system isolation —
+# for that use test-docker)
+lint:
+	ruff check src tests
+	ruff format --check src tests
+	mypy src
+
 test-docker:
 	docker run --rm --network none -v "$$PWD":/repo:ro -w /repo waybar-vpn-manager-test
 
-.PHONY: install uninstall test-docker-build test-docker
+.PHONY: install uninstall lint test-docker-build test-docker

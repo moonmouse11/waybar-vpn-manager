@@ -11,11 +11,16 @@ import contextlib
 import json
 import threading
 import time
-import urllib.request
+import urllib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import fsutil
+import lazyimports  # noqa: F401 — registers urllib.request & co. to load on first use
 import logutil
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import urllib.request
 
 CACHE_PATH = Path.home() / ".cache" / "vpn-manager" / "exit_ip.json"
 # ipwho.is gives IP + country in one request; ifconfig.me is the plain-IP fallback
@@ -49,7 +54,7 @@ def is_fresh(cache: dict | None, connection: str, max_age: int) -> bool:
 def status_line(connection: str, max_age: int) -> str | None:
     """Tooltip line like 'Exit: 144.31.166.213 🇩🇪', or None if stale/missing."""
     cache = read_cache()
-    if not is_fresh(cache, connection, max_age):
+    if cache is None or not is_fresh(cache, connection, max_age):
         return None
     line = f"Exit: {cache['ip']}"
     flag = flag_emoji(cache.get("country_code"))

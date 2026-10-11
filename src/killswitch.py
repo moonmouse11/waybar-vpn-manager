@@ -37,6 +37,7 @@ def is_enabled() -> bool:
         ["sudo", "-n", SCRIPT, "is-on"],
         capture_output=True,
         timeout=15,
+        check=False,
     )
     return result.returncode == 0
 
@@ -146,7 +147,7 @@ def resolve_endpoint_ips(targets: list[tuple[str, str, int]]) -> list[str]:
             logutil.log(f"killswitch: cannot resolve {host} ({name}): {e}")
             continue
         if infos:
-            ips.add(infos[0][4][0])
+            ips.add(str(infos[0][4][0]))
     return sorted(ips)
 
 
@@ -156,6 +157,7 @@ def _sudo(*args: str) -> ActionResult:
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
     output = (result.stdout + result.stderr).strip()
     logutil.log(f"killswitch: {' '.join(args)} -> rc={result.returncode}: {output[:200]}")

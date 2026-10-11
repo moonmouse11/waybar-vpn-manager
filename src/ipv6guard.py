@@ -27,7 +27,7 @@ def is_disabled() -> bool:
     """Probe via an unprivileged read — no sudo needed for `sysctl -n`."""
     try:
         result = subprocess.run(
-            ["sysctl", "-n", _ALL_KEY], capture_output=True, text=True, timeout=5
+            ["sysctl", "-n", _ALL_KEY], capture_output=True, text=True, timeout=5, check=False
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -56,6 +56,7 @@ def _set(value: int) -> ActionResult:
             capture_output=True,
             text=True,
             timeout=5,
+            check=False,
         )
         output = (result.stdout + result.stderr).strip()
         logutil.log(f"ipv6guard: {key}={value} -> rc={result.returncode}: {output[:200]}")

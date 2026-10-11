@@ -19,16 +19,19 @@ import ipaddress
 import json
 import re
 import socket
-import statistics
 import subprocess
 import sys
 import time
 import urllib.parse
-import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import fsutil
+from lazyimports import statistics  # also registers urllib.request & co. lazily
+
+if TYPE_CHECKING:  # loaded lazily at run time, see lazyimports.py
+    import urllib.request
 
 LOG_FILE = Path.home() / ".local/share/Happ/logs/subscription_log.txt"
 ROUTING_FILE = Path.home() / ".config/Happ/routing.json"
@@ -127,8 +130,9 @@ def _parse_providers() -> dict[str, dict]:
     # Newly added subscriptions log no id line — only this. The numeric id is
     # not available unencrypted (subs.db is AES-GCM), so synthesize a stable
     # id from the url; a later real id line for the same url always wins.
-    for m in re.finditer(r"Subscription being added: (\S+)", text):
-        added_urls.append((m.start(), m.group(1)))
+    added_urls.extend(
+        (m.start(), m.group(1)) for m in re.finditer(r"Subscription being added: (\S+)", text)
+    )
     # Atomic group around the repeated "[...]" prefix: once it has consumed
     # N bracket groups it commits to that count instead of retrying N-1,
     # N-2, ... against the trailing ".+?" when "fetching subscription from"
@@ -189,7 +193,7 @@ def _parse_providers() -> dict[str, dict]:
     for sub_id, url in id_url.items():
         providers[sub_id] = {"name": _resolve_name(url, f"Subscription {sub_id}"), "url": url}
     for host, url in synth.items():
-        sub_id = "h" + hashlib.sha1(url.encode()).hexdigest()[:10]
+        sub_id = "h" + hashlib.sha1(url.encode(), usedforsecurity=False).hexdigest()[:10]
         providers[sub_id] = {"name": _resolve_name(url, host), "url": url}
 
     # Fallback names from routing.json (routing names per subscription)
@@ -285,10 +289,11 @@ def fetch_subscription(sub_id: str, url: str, force: bool = False) -> list[dict]
         return cached.get("servers", [])
 
     headers = _headers()
-    if headers:
-        req = urllib.request.Request(url, headers=headers)
+    # the url comes from Happ's log: never let it open file:// or other schemes
+    if headers and url.startswith(("https://", "http://")):
+        req = urllib.request.Request(url, headers=headers)  # noqa: S310 — scheme checked
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 — scheme checked
                 data = json.loads(resp.read().decode())
                 info = _parse_sub_info(resp)  # headers only readable while open
             if isinstance(data, list) and data and isinstance(data[0], dict):
@@ -337,7 +342,7 @@ def _parse_sub_info(resp) -> dict | None:
         title = title.strip()
         if title.startswith("base64:"):
             try:
-                title = base64.b64decode(title[len("base64:"):]).decode("utf-8", errors="replace")
+                title = base64.b64decode(title[len("base64:") :]).decode("utf-8", errors="replace")
             except (ValueError, TypeError):
                 title = None
         info["title"] = title or None
@@ -385,25 +390,45 @@ def fmt_expire(epoch: int | None) -> str:
         return "?"
 
 
+# path -> ((inode, mtime_ns, size), parsed). One --status run read every
+# subscription cache (~1 MB of JSON) twice — freshness check, then the server
+# list — ~40 ms of a 3-second tick. Writes go through os.replace, so a new
+# file always has a new inode and a stale entry can't match.
+_SUB_CACHE_MEMO: dict[Path, tuple[tuple[int, int, int], object]] = {}
+
+
+def _read_sub_cache(sub_id: str) -> object:
+    """Parsed subscription cache file, or None if missing/unreadable."""
+    path = _sub_cache_path(sub_id)
+    try:
+        st = path.stat()
+        key = (st.st_ino, st.st_mtime_ns, st.st_size)
+        memo = _SUB_CACHE_MEMO.get(path)
+        if memo and memo[0] == key:
+            return memo[1]
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    _SUB_CACHE_MEMO[path] = (key, data)
+    return data
+
+
 def fetch_subscription_cached(sub_id: str) -> list[dict]:
     """Cache-only read: fresh or stale servers, never touches the network.
     Used on the waybar --status path so a 3 s tick never blocks on I/O."""
-    try:
-        cached = json.loads(_sub_cache_path(sub_id).read_text())
-    except (OSError, json.JSONDecodeError):
-        return []
+    cached = _read_sub_cache(sub_id)
     return cached.get("servers", []) if isinstance(cached, dict) else []
 
 
 def _sub_cache_fresh(sub_id: str, url: str) -> bool:
+    cached = _read_sub_cache(sub_id)
     try:
-        cached = json.loads(_sub_cache_path(sub_id).read_text())
         return (
             isinstance(cached, dict)
             and cached.get("url", url) == url  # legacy records without url match
             and time.time() - cached.get("at", 0) < SUB_MAX_AGE
         )
-    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+    except (AttributeError, TypeError):
         return False
 
 
@@ -545,8 +570,11 @@ def _tunnel_target(rules: list[dict], outbounds: list[dict]) -> dict:
     freedom = {o.get("tag") for o in outbounds if o.get("protocol") == "freedom"}
     if target.get("outboundTag") in freedom:
         proxy = next(
-            (o["tag"] for o in outbounds
-             if o.get("tag") and o.get("protocol") not in NON_PROXY_PROTOCOLS),
+            (
+                o["tag"]
+                for o in outbounds
+                if o.get("tag") and o.get("protocol") not in NON_PROXY_PROTOCOLS
+            ),
             None,
         )
         if proxy:
@@ -871,7 +899,7 @@ def ping_targets() -> list[tuple[str, str, int]]:
 
 def write_pings(targets: list[tuple[str, str, int]]) -> None:
     """Measure and write the ping cache (single writer, fixed format)."""
-    pings: dict[str, dict] = {}
+    pings: dict[str, Any] = {}  # name -> {ms, at}, plus updated_at
     for name, host, port in targets:
         try:
             ms = measure_ping(host, port)

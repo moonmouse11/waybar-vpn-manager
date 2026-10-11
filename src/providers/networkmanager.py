@@ -35,7 +35,7 @@ TIMEOUT = 6
 
 def _run(cmd: list[str]) -> tuple[int, str]:
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, check=False)
     except subprocess.TimeoutExpired:
         return 1, f"timeout after {TIMEOUT}s: {' '.join(cmd)}"
     return result.returncode, (result.stdout + result.stderr).strip()
