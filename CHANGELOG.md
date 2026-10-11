@@ -10,12 +10,20 @@ from the git history.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-11
+
+The last release for Omarchy 3 (Waybar + Walker); development continues in
+[omarchy-vpn](https://github.com/moonmouse11/omarchy-vpn) for Omarchy 4.
+
 ### Added
 
+- **Happ setup instructions** in the README: capturing the subscription
+  request headers once, and removing the temporary CA afterwards.
+- MIT license.
 - **Progress for DNS Leak Test, Speed Test and IP Info:** one notification,
   updated in place step by step, since the menu window can't change while a
   tool runs. A `notify-send` without `-p` / `-r` shows the steps as separate
-  notifications instead.
+  notifications instead ([#15]).
 - **Happ: headless operation.** Subscriptions are fetched directly and turned
   into runnable xray configs, so every server can be listed and connected
   without the Happ GUI — through the `happd` daemon, with server switching,
@@ -62,14 +70,14 @@ from the git history.
 
 - `--status`, which Waybar runs every 3 s, is ~17% faster: the network stack
   (urllib, http.client, ssl) loads only when a tool actually uses it, and each
-  Happ subscription cache is parsed once per run instead of twice.
+  Happ subscription cache is parsed once per run instead of twice ([#17]).
 - **⚙ Settings is one list** in a small floating terminal instead of a chain
   of Yes / No windows, keyboard-driven like omarchy's own TUIs: every setting
   is a row showing its value (✅ / ⬜), Space / Enter changes it in place, `s`
   saves, `q` / Esc quits (asking first about unsaved changes). A second click
-  focuses the open window. The terminal `--configure` wizard is unchanged.
+  focuses the open window. The terminal `--configure` wizard is unchanged ([#16]).
 - Menus open in one fixed-size window instead of growing and shrinking with
-  the rows on screen.
+  the rows on screen ([#16]).
 - The DNS Leak Test expects the exit country from the flag in the server name
   instead of the server's entry IP: most subscription servers enter through a
   Russian relay and exit abroad, which used to flag about half of them as
@@ -82,40 +90,45 @@ from the git history.
 - Stricter checks: more Ruff rule sets (pylint, bandit, pathlib, perf…),
   `ruff format --check` and `mypy` in CI and `make lint`. The test image and
   the Sonar / xray-compat jobs run on Python 3.14, what Arch ships; 3.11–3.14
-  stay tested.
+  stay tested ([#17]).
 
 ### Removed
 
+- Research scripts that decrypted Happ's subscription database or read it
+  from the app's memory — not needed since subscriptions are fetched
+  directly, and not something a VPN plugin should ship.
 - The Outline provider, superseded by imported Shadowsocks keys.
 - The Subdomain Search tool: a passive certificate-log lookup with no bearing
   on the tunnel's state.
 
 ### Fixed
 
-- Imported VLESS / Shadowsocks keys were identified by a truncated SHA-1 of
-  the key's password or UUID, passed on the keeper's command line where any
-  local user can read it with `ps`. Keys now get a random id; keys imported
-  earlier get one on their next connect (reconnect once after updating).
+- A subscription balancer that wrote its strategy as `"settings": {"type":
+  "leastPing"}` ran as `random`: xray reads only `"strategy"` and ignores
+  the other key silently. It is now moved into `"strategy"`.
+- A network tool failing with no VPN connected blamed a slow VPN exit; with
+  the killswitch on it now says that the killswitch blocks all traffic until a
+  VPN is connected. Failure reasons are also written to the log.
 - Leaving the Happ menu ended the menu process with an error: the Happ
   submenu returned nothing where an action result was expected (found by the
-  new type check).
-- A subscription URL read from Happ's log is only fetched over `http(s)://`.
+  new type check) ([#17]).
+- A subscription URL read from Happ's log is only fetched over `http(s)://` ([#17]).
 - `make test-docker-build` could hang forever on a stalled xray download; it
-  now times out and retries.
+  now times out and retries ([#17]).
 - **Old Happ / Keys keepers never exited after a server switch** with Happ
   4.5.2: its daemon no longer sends a "stopped" event, and the new tunnel
   reuses the interface name, so every previous connection's keeper lingered
   ("two connections at once"). Keepers now also exit as soon as a newer one
-  owns the connection.
+  owns the connection ([#15]).
 - **A disconnected tunnel kept showing as connected — under another server's
   name.** For up to 3 s after a disconnect, a stale process list made the
   plugin name the tunnel after the Happ GUI's last-used server, so Waybar
   showed it and the menu's "↻" row reconnected *that* server. The cache is
   now dropped on every connect / disconnect / switch, and the GUI's last
-  server only names a tunnel while the GUI itself is running.
+  server only names a tunnel while the GUI itself is running ([#15]).
 - **Failed tools now say why.** DNS Leak Test, Speed Test and IP Info used to
   end with a generic "no network?"; the critical notification now names the
-  step and the cause (e.g. a TLS handshake timeout through a slow VPN exit).
+  step and the cause (e.g. a TLS handshake timeout through a slow VPN exit) ([#15]).
 - **Headless Happ connect broke after updating to Happ 4.5.2:** its xray
   26.9.x rejects the outbound `proxySettings` field the generated config used,
   so xray never started ([#10]).
@@ -133,6 +146,13 @@ from the git history.
 
 ### Security
 
+- The header-capture scripts no longer default to one particular
+  subscription host, and test fixtures no longer contain real server
+  addresses or subscription ids.
+- Imported VLESS / Shadowsocks keys were identified by a truncated SHA-1 of
+  the key's password or UUID, passed on the keeper's command line where any
+  local user can read it with `ps`. Keys now get a random id; keys imported
+  earlier get one on their next connect (reconnect once after updating) ([#17]).
 - Files holding keys, passwords and API keys are written atomically and
   created with `0600` permissions, never briefly world-readable ([#8]).
 - `/tmp/happd.sock` is used only if it is a socket owned by root or the user,
@@ -163,7 +183,8 @@ from the git history.
 - `make install` / `make uninstall`, with a passwordless sudoers rule for the
   VPN commands.
 
-[Unreleased]: https://github.com/moonmouse11/waybar-vpn-manager/compare/2d19494...HEAD
+[Unreleased]: https://github.com/moonmouse11/waybar-vpn-manager/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/moonmouse11/waybar-vpn-manager/compare/2d19494...v0.3.0
 [0.2.0]: https://github.com/moonmouse11/waybar-vpn-manager/compare/e73f3fa...2d19494
 [0.1.0]: https://github.com/moonmouse11/waybar-vpn-manager/commit/e73f3fa
 [#1]: https://github.com/moonmouse11/waybar-vpn-manager/pull/1
@@ -178,3 +199,6 @@ from the git history.
 [#12]: https://github.com/moonmouse11/waybar-vpn-manager/pull/12
 [#13]: https://github.com/moonmouse11/waybar-vpn-manager/pull/13
 [#14]: https://github.com/moonmouse11/waybar-vpn-manager/pull/14
+[#15]: https://github.com/moonmouse11/waybar-vpn-manager/pull/15
+[#16]: https://github.com/moonmouse11/waybar-vpn-manager/pull/16
+[#17]: https://github.com/moonmouse11/waybar-vpn-manager/pull/17

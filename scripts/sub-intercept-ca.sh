@@ -4,12 +4,12 @@
 # app sends; the remote serves a stub to plain curl).
 #
 # Usage:
-#   bash scripts/sub-intercept-ca.sh xskx.artemida.live
+#   bash scripts/sub-intercept-ca.sh <subscription host, e.g. sub.example.com>
 # then follow the printed sudo steps, add the hosts entry, run
 # scripts/sub-intercept-serve.py and press «update subscription» in Happ.
 set -euo pipefail
 
-DOMAIN="${1:-xskx.artemida.live}"
+DOMAIN="${1:?usage: sub-intercept-ca.sh <subscription host>}"
 WORKDIR="/tmp/happ-intercept"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"

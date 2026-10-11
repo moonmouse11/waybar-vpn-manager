@@ -44,12 +44,12 @@ def test_parse_vless_minimal():
     """The user's real key shape: no query params at all (tcp, no tls).
     The key-shop " / OutlineKeys.com" suffix is stripped from the name."""
     parsed = keys.parse_vless_key(
-        "vless://3874802c-d7fb-43e3-aeed-d4413fe444b2@94.130.68.139:2222"
+        "vless://3874802c-d7fb-43e3-aeed-d4413fe444b2@203.0.113.20:2222"
         "#Germany%20%2341294%20%2F%20OutlineKeys.com"
     )
     assert parsed["kind"] == "vless"
     assert parsed["id"] == "3874802c-d7fb-43e3-aeed-d4413fe444b2"
-    assert parsed["host"] == "94.130.68.139"
+    assert parsed["host"] == "203.0.113.20"
     assert parsed["port"] == 2222
     assert parsed["network"] == "tcp"
     assert parsed["security"] == "none"

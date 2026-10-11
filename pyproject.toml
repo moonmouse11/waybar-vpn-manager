@@ -1,8 +1,14 @@
 [project]
 name = "waybar-vpn-manager"
-version = "0.2.0"
-description = "Waybar VPN manager plugin with support for WireGuard, OpenVPN, Outline and Happ"
+version = "0.3.0"
+description = "Waybar + Walker VPN manager for Omarchy 3: WireGuard, AmneziaWG, OpenVPN, NetworkManager, VLESS / Shadowsocks keys and Happ"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+
+[project.urls]
+Repository = "https://github.com/moonmouse11/waybar-vpn-manager"
+Changelog = "https://github.com/moonmouse11/waybar-vpn-manager/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10"]

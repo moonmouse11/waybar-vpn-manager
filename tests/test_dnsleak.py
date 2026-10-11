@@ -140,7 +140,7 @@ def test_asn_number_parsing():
 
 
 def test_server_tags_public_resolver_trusted_even_abroad():
-    server = {"ip": "172.69.50.15", "country": "nl", "asn": "AS13335 CloudFlare Inc"}
+    server = {"ip": "198.51.100.40", "country": "nl", "asn": "AS13335 CloudFlare Inc"}
     assert dnsleak.server_tags(server, ip_country="DE", ip_asn=24940) == []
 
 

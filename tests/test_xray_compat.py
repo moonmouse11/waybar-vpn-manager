@@ -241,7 +241,8 @@ _HYSTERIA_MASKED_LEASTPING = {
 # outbounds into per-bridge balancers (the "to-*"/"lb-to-*"/"bal-*"
 # wiring is verbatim from a real subscription), observatory-driven. The
 # real one writes leastPing as balancer "settings": {"type": ...}, a key
-# xray silently ignores; "strategy" here so the strategy actually parses. Also
+# xray silently ignores — kept as shipped: happmeta._normalize_balancer()
+# moves it to "strategy", and xray must accept the result. Also
 # ships its own dns-out and a *balancer* tagged "direct" next to the
 # "direct" freedom outbound — both seen in the wild.
 _LOOPBACK_CHAIN = {
@@ -269,7 +270,7 @@ _LOOPBACK_CHAIN = {
             {
                 "tag": "ENTRY-PROXY",
                 "selector": ["candidate"],
-                "strategy": {"type": "leastPing"},
+                "settings": {"type": "leastPing"},  # as shipped; build_runtime_config fixes it
                 "fallbackTag": "to-a",
             },
             {"tag": "direct", "selector": ["direct"], "fallbackTag": "to-proxy"},

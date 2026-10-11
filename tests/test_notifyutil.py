@@ -133,3 +133,11 @@ def test_progress_falls_back_when_notify_send_rejects_print_id(monkeypatch):
     shown = [c for c in calls if "-p" not in c and "-r" not in c]
     assert [c[-1] for c in shown] == ["1/3 · requesting a test id", "failed at 1/3: timed out"]
     assert "critical" in shown[-1]
+
+
+def test_progress_fail_logs_the_reason(monkeypatch):
+    logged = []
+    monkeypatch.setattr(notifyutil.logutil, "log", logged.append)
+    monkeypatch.setattr(notifyutil, "send", lambda *a, **k: None)
+    notifyutil.Progress("DNS Leak Test").fail("Test failed at 1/3: timed out")
+    assert logged == ["DNS Leak Test failed: Test failed at 1/3: timed out"]

@@ -440,10 +440,16 @@ def _dns_leak_verdict_row(result: dict) -> str | None:
     return "DNS via VPN or public resolvers"
 
 
-def _timeout_hint(reason: str) -> str:
-    """A timeout through a tunnel is rarely "no network" — usually the exit
-    is slow or the target is blocked from it (seen: TLS handshakes of 6-8 s
-    on one exit, bash.ws unreachable)."""
+def _failure_hint(reason: str) -> str:
+    """Why a network tool most likely failed, beyond its raw error.
+
+    No VPN + killswitch on: every packet is dropped by design (killswitch_mode
+    "all"/"happ" keeps it on after a disconnect) — the raw error is just a
+    timeout. Through a tunnel, a timeout is rarely "no network": usually the
+    exit is slow or blocks the target (seen: TLS handshakes of 6-8 s on one
+    exit; on two others even the exit-IP check timed out at the same time)."""
+    if not active_connections() and killswitch.is_enabled():
+        return " — the killswitch blocks all traffic while no VPN is connected"
     if "timed out" in reason.lower():
         return " — the VPN exit may be slow or blocking it; try another server"
     return ""
@@ -458,7 +464,7 @@ def dns_leak_test_menu() -> ActionResult:
     try:
         result = dnsleak.run(on_step=lambda n, label: progress.step(n, f"{label}…"))
     except dnsleak.LeakTestError as e:
-        progress.fail(f"Test {e}{_timeout_hint(e.reason)}")
+        progress.fail(f"Test {e}{_failure_hint(e.reason)}")
         return ActionResult(False, "")  # already notified, with the reason
     progress.done("Done")
 
@@ -508,7 +514,7 @@ def ip_info_menu() -> ActionResult:
             reason = "could not detect your public IP (ipwho.is, ifconfig.me)"
         else:
             reason = f"no IP source answered within {reputation.LOOKUP_TIMEOUT:.0f} s"
-        progress.fail(f"Failed: {reason}")
+        progress.fail(f"Failed: {reason}{_failure_hint(reason)}")
         return ActionResult(False, "")  # already notified, with the reason
     progress.done("Done")
 
@@ -601,7 +607,7 @@ def _run_speed_tests(
         progress.done(f"Done — {len(ok)}/{len(results)} measured")
     else:
         first = next(m.error for _name, m in results if m.error)
-        progress.fail(f"All {len(results)} failed — {first}{_timeout_hint(first)}")
+        progress.fail(f"All {len(results)} failed — {first}{_failure_hint(first)}")
     if len(results) > 1 and ok:
         best = max(ok, key=lambda r: r[1])
         items.append((f"🏆 Fastest: {best[0]} ({best[1]:.1f} Mbit/s)", noop))

@@ -1,5 +1,10 @@
 # waybar-vpn-manager
 
+> **Archived.** This is the last version for **Omarchy 3** (Waybar + Walker),
+> released as [v0.3.0](CHANGELOG.md). Omarchy 4 replaced Waybar and Walker with
+> its own shell; development continues in
+> [omarchy-vpn](https://github.com/moonmouse11/omarchy-vpn).
+
 A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with support for
 **WireGuard, AmneziaWG, OpenVPN, Shadowsocks (ss://), VLESS (vless://), Happ** and any VPN managed by **NetworkManager**.
 Built for Arch Linux with Hyprland / [Omarchy](https://omarchy.org/).
@@ -110,12 +115,32 @@ hyprctl reload
 
 ### Happ setup (one-time, for headless)
 
-Happ subscriptions are fetched directly with the app's own request headers
-(remote answers plain curl with a stub). Capture them once — see
-[`docs/happd-protocol.md`](docs/happd-protocol.md) — and save to
-`~/.config/happ-capture/headers.json`. After that the full server list, generated
-configs, ping and headless connect work out of the box; new servers from the
-provider appear automatically.
+Happ subscriptions are fetched directly with the app's own request headers —
+providers answer a plain `curl` with a stub. Capture them once from your own
+machine with a short-lived local CA and HTTPS server (nothing leaves the
+machine):
+
+1. Take the subscription host from its URL in Happ (`https://<host>/...`) and
+   run `bash scripts/sub-intercept-ca.sh <host>`. It creates the CA (valid
+   30 days) and a server certificate (7 days) in `/tmp/happ-intercept` and
+   prints the next steps with your host filled in:
+   - trust the CA,
+   - point `<host>` at `127.0.0.1` in `/etc/hosts`,
+   - run `sudo python3 scripts/sub-intercept-serve.py <host>`,
+   - press **update subscription** in Happ.
+2. The request lands in `/tmp/happ-intercept/request.txt`. Put its headers
+   (all but `Host`, `Content-Length`, `Connection`) into
+   `~/.config/happ-capture/headers.json` as one JSON object —
+   `{"User-Agent": "…", "X-Hwid": "…", …}` — and `chmod 600` it: they
+   identify your device to the provider.
+3. **Clean up** as the script's last step says: remove the `/etc/hosts` line,
+   untrust the CA and delete `/tmp/happ-intercept`. A CA left trusted lets
+   anyone holding its key impersonate `<host>` to you.
+
+After that the full server list, generated configs, ping and headless connect
+work out of the box; subscriptions refresh in the background (hourly, or
+🛠 Tools → 🔄 Refresh All) and new servers from the provider appear
+automatically.
 
 ## Usage
 
@@ -193,8 +218,7 @@ src/
   logutil.py          file logging
   providers/          VPN backend registry + implementations (VPNProvider ABC)
   ipsources/          IP-intelligence source registry + implementations (IPInfoSource ABC)
-docs/happd-protocol.md   Happ daemon protocol RE notes
-scripts/              dev/research tools (subscription intercept, strace capture, …)
+scripts/              happ-killswitch, openvpn-dns-updown; Happ header capture (sub-intercept-*), happd protocol capture
 tests/                pytest suite
 ```
 
@@ -282,3 +306,8 @@ make uninstall
 
 Removes installed files and the sudoers rule. The waybar module block and the
 SUPER+Shift+V bindings are left in place (remove manually if wanted).
+
+## License
+
+MIT — see [LICENSE](LICENSE). `src/dnsleak.py` reimplements the protocol of
+[macvk/dnsleaktest](https://github.com/macvk/dnsleaktest) (MIT).
