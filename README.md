@@ -5,6 +5,8 @@
 > its own shell; development continues in
 > [omarchy-vpn](https://github.com/moonmouse11/omarchy-vpn).
 
+[![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=moonmouse11_waybar-vpn-manager&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=moonmouse11_waybar-vpn-manager)
+
 A VPN manager plugin for [Waybar](https://github.com/Alexays/Waybar) with support for
 **WireGuard, AmneziaWG, OpenVPN, Shadowsocks (ss://), VLESS (vless://), Happ** and any VPN managed by **NetworkManager**.
 Built for Arch Linux with Hyprland / [Omarchy](https://omarchy.org/).
